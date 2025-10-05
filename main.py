@@ -17,10 +17,10 @@ def health():
     return 'Bot is alive! 🌿', 200
 
 def run_flask():
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port)
+    port = int(os.environ.get('PORT', 8080))  # Render sets PORT
+    app.run(host='0.0.0.0', port=port, debug=False)
 
-# Start Flask in a background thread
+# Start Flask in a background thread (bot runs normally)
 flask_thread = threading.Thread(target=run_flask, daemon=True)
 flask_thread.start()
 
