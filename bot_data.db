@@ -10,7 +10,6 @@ c.execute("""
         level_channel INTEGER
     )
 """)
-
 c.execute("""
     CREATE TABLE IF NOT EXISTS xp (
         guild_id INTEGER,
@@ -19,7 +18,6 @@ c.execute("""
         PRIMARY KEY (guild_id, user_id)
     )
 """)
-
 c.execute("""
     CREATE TABLE IF NOT EXISTS mod_stats (
         guild_id INTEGER,
@@ -28,14 +26,12 @@ c.execute("""
         timestamp TEXT
     )
 """)
-
 c.execute("""
     CREATE TABLE IF NOT EXISTS last_seen (
         guild_id INTEGER PRIMARY KEY,
         timestamp TEXT
     )
 """)
-
 c.execute("""
     CREATE TABLE IF NOT EXISTS last_deleted_photo (
         guild_id INTEGER,
@@ -45,7 +41,6 @@ c.execute("""
         timestamp TEXT
     )
 """)
-
 c.execute("""
     CREATE TABLE IF NOT EXISTS afk (
         user_id INTEGER PRIMARY KEY,
