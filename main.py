@@ -13,12 +13,27 @@ import aiohttp
 import aiofiles
 from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
-from typing import Optional
+from typing import Optional, Dict, List
 import tempfile
 import shutil
 import aiosqlite
 import base64
 from flask import Flask, send_from_directory
+
+class DiscordBot(commands.Bot):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.prefixes: Dict[int, str] = {}
+        self.level_channels: Dict[int, Optional[int]] = {}
+        self.xp_data: Dict[int, Dict[int, int]] = {}
+        self.mod_stats: Dict[int, Dict[int, Dict[str, List[str]]]] = {}
+        self.last_seen: Dict[int, str] = {}
+        self.last_deleted_photo: Dict[int, List[Dict[str, str]]] = {}
+        self.afk_cache: Dict[int, Dict[str, str]] = {}
+        self.msg_cooldown: Dict[int, Dict[int, float]] = {}
+
+    async def setup_hook(self) -> None:
+        self.loop.create_task(self.periodic_db_upload())
 
 # Flask setup for health check
 app = Flask(__name__, static_folder='static')
@@ -33,8 +48,11 @@ def favicon():
     return send_from_directory(app.static_folder, 'favicon.ico', mimetype='image/vnd.microsoft.icon')
 
 def run_flask():
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    try:
+        port = int(os.environ.get('PORT', 8080))
+        app.run(host='0.0.0.0', port=port, debug=False)
+    except Exception as e:
+        logger.error(f"Flask server failed to start: {e}")
 
 # Start Flask in a background thread
 flask_thread = threading.Thread(target=run_flask, daemon=True)
@@ -53,23 +71,13 @@ if GUILD_ID:
 else:
     GUILD_ID = None
 DEFAULT_PREFIX = os.getenv("PREFIX", "!")
-DB_FILE = "bot_data.db"  # SQLite database file
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Add to Render env vars
-REPO = os.getenv("GITHUB_REPO", "your-username/bot-data")  # Add to Render env vars, e.g., "username/bot-data"
+DB_FILE = "bot_data.db"
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+REPO = os.getenv("GITHUB_REPO", "your-username/bot-data")
 
 if not TOKEN:
     logger.error("DISCORD_TOKEN is not set in .env file")
     raise ValueError("DISCORD_TOKEN is required")
-
-# Data structures
-prefixes: dict[int, str] = {}
-level_channels: dict[int, Optional[int]] = {}
-xp_data: dict[int, dict[int, int]] = {}
-mod_stats: dict[int, dict[int, dict[str, list]]] = {}
-last_seen: dict[int, str] = {}
-last_deleted_photo: dict[int, list[dict]] = {}
-afk_cache: dict[int, dict] = {}
-msg_cooldown: dict[int, dict[int, float]] = {}
 
 # GitHub sync functions
 async def download_db():
@@ -116,7 +124,7 @@ async def upload_db():
             else:
                 logger.error(f"Failed to upload DB: {await resp.text()}")
 
-async def periodic_db_upload():
+async def periodic_db_upload(self):
     while True:
         await upload_db()
         await asyncio.sleep(300)  # Every 5 minutes
@@ -454,7 +462,7 @@ async def mod_action_embed(target: discord.abc.User, action: str, reason: Option
     embed.add_field(name="Moderator", value=f"{mod} ({mod.id})", inline=True)
     embed.add_field(name="Reason", value=reason or "No reason provided", inline=False)
     embed.set_thumbnail(url=target.display_avatar.url if hasattr(target, 'display_avatar') else None)
-    embed.set_footer(text="Moderation action logged.", icon_url="https://i.imgur.com/3J2N8fI.png")  # Replace with a suitable icon URL
+    embed.set_footer(text="Moderation action logged.", icon_url="https://i.imgur.com/3J2N8fI.png ")  # Replace with a suitable icon URL
     return embed
 
 # Command handlers
@@ -492,7 +500,7 @@ async def help_handler(interaction_or_ctx):
     is_admin = guild and (user.guild_permissions.kick_members or user.guild_permissions.ban_members or user.guild_permissions.manage_guild or user == guild.owner)
     prefix = prefixes.get(guild.id if guild else 0, DEFAULT_PREFIX)
     embed = discord.Embed(title="🛠️ Command Guide", description=f"Use `{prefix}` for prefix commands or `/` for slash commands.\n\nType a command for more info!", color=discord.Color.from_rgb(0, 170, 255), timestamp=datetime.now(timezone.utc))
-    embed.set_thumbnail(url="https://i.imgur.com/5BFecvA.png")  # Replace with a bot icon or help image
+    embed.set_thumbnail(url="https://i.imgur.com/5BFecvA.png ")  # Replace with a bot icon or help image
     general_cmds = [
         ("ping", "Bot latency check 🏓"),
         ("help", "Show this guide 📚"),
@@ -535,7 +543,7 @@ async def help_handler(interaction_or_ctx):
             ("levelchannelset <channel>", "Set level channel 📢")
         ]
         embed.add_field(name="🔰 Admin Commands", value="\n".join(f"**`{cmd}`** - {desc}" for cmd, desc in admin_cmds), inline=False)
-    embed.set_footer(text="Bot by xAI | Use responsibly!", icon_url="https://i.imgur.com/klY5xCe.png")
+    embed.set_footer(text="Bot by xAI | Use responsibly!", icon_url="https://i.imgur.com/klY5xCe.png ")
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 async def purge_handler(interaction_or_ctx, amount: int):
