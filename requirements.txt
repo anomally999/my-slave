@@ -4,3 +4,4 @@ aiohttp
 Pillow
 flask
 aiofiles
+aiosqlite
