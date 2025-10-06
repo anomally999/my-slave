@@ -1,0 +1,60 @@
+import sqlite3
+
+conn = sqlite3.connect('bot_data.db')
+c = conn.cursor()
+
+c.execute("""
+    CREATE TABLE IF NOT EXISTS settings (
+        guild_id INTEGER PRIMARY KEY,
+        prefix TEXT,
+        level_channel INTEGER
+    )
+""")
+
+c.execute("""
+    CREATE TABLE IF NOT EXISTS xp (
+        guild_id INTEGER,
+        user_id INTEGER,
+        xp INTEGER,
+        PRIMARY KEY (guild_id, user_id)
+    )
+""")
+
+c.execute("""
+    CREATE TABLE IF NOT EXISTS mod_stats (
+        guild_id INTEGER,
+        user_id INTEGER,
+        action TEXT,
+        timestamp TEXT
+    )
+""")
+
+c.execute("""
+    CREATE TABLE IF NOT EXISTS last_seen (
+        guild_id INTEGER PRIMARY KEY,
+        timestamp TEXT
+    )
+""")
+
+c.execute("""
+    CREATE TABLE IF NOT EXISTS last_deleted_photo (
+        guild_id INTEGER,
+        author TEXT,
+        content TEXT,
+        image_url TEXT,
+        timestamp TEXT
+    )
+""")
+
+c.execute("""
+    CREATE TABLE IF NOT EXISTS afk (
+        user_id INTEGER PRIMARY KEY,
+        reason TEXT,
+        since TEXT
+    )
+""")
+
+conn.commit()
+conn.close()
+
+print("bot_data.db created successfully.")
