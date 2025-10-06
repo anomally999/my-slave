@@ -1,7 +1,7 @@
 discord.py
 python-dotenv
 aiohttp
-Pillow
-flask
 aiofiles
+pillow
 aiosqlite
+flask

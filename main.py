@@ -386,7 +386,7 @@ intents.members = True
 intents.message_content = True
 intents.guilds = True
 
-bot = commands.Bot(command_prefix=lambda bot_, msg: commands.when_mentioned_or(prefixes.get(msg.guild.id, DEFAULT_PREFIX) if msg.guild else DEFAULT_PREFIX)(bot_, msg), intents=intents, help_command=None)
+bot = DiscordBot(command_prefix=lambda bot_, msg: commands.when_mentioned_or(prefixes.get(msg.guild.id, DEFAULT_PREFIX) if msg.guild else DEFAULT_PREFIX)(bot_, msg), intents=intents, help_command=None)
 tree = bot.tree
 
 # Helpers
