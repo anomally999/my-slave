@@ -16,15 +16,21 @@ from PIL import Image, ImageDraw, ImageFont
 from typing import Optional
 import tempfile
 import shutil
-from flask import Flask
+import aiosqlite
+import base64
+from flask import Flask, send_from_directory
 
 # Flask setup for health check
-app = Flask(__name__)
+app = Flask(__name__, static_folder='static')
 
 @app.route('/')
 @app.route('/health')
 def health():
     return 'Bot is alive! 🌿', 200
+
+@app.route('/favicon.ico')
+def favicon():
+    return send_from_directory(app.static_folder, 'favicon.ico', mimetype='image/vnd.microsoft.icon')
 
 def run_flask():
     port = int(os.environ.get('PORT', 8080))
@@ -47,20 +53,13 @@ if GUILD_ID:
 else:
     GUILD_ID = None
 DEFAULT_PREFIX = os.getenv("PREFIX", "!")
-SETTINGS_FILE = "settings.json"
-MOD_STATS_DIR = "mod_stats"
-XP_DIR = "xp_data"
-LAST_SEEN_FILE = "last_seen.json"
-LAST_DELETED_PHOTO_DIR = "last_deleted_photo"
-AFK_FILE = "afk.json"
+DB_FILE = "bot_data.db"  # SQLite database file
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Add to Render env vars
+REPO = os.getenv("GITHUB_REPO", "your-username/bot-data")  # Add to Render env vars, e.g., "username/bot-data"
 
 if not TOKEN:
     logger.error("DISCORD_TOKEN is not set in .env file")
     raise ValueError("DISCORD_TOKEN is required")
-
-# Create directories
-for directory in [MOD_STATS_DIR, XP_DIR, LAST_DELETED_PHOTO_DIR]:
-    os.makedirs(directory, exist_ok=True)
 
 # Data structures
 prefixes: dict[int, str] = {}
@@ -72,55 +71,146 @@ last_deleted_photo: dict[int, list[dict]] = {}
 afk_cache: dict[int, dict] = {}
 msg_cooldown: dict[int, dict[int, float]] = {}
 
-# File operations
-async def load_json(file_path: str, default=None):
-    try:
-        async with aiofiles.open(file_path, "r", encoding='utf-8') as f:
-            return json.loads(await f.read())
-    except Exception as e:
-        logger.error(f"Failed to load {file_path}: {e}")
-        return default
+# GitHub sync functions
+async def download_db():
+    if not GITHUB_TOKEN:
+        logger.warning("GITHUB_TOKEN not set; starting with new DB")
+        return
+    url = f"https://raw.githubusercontent.com/{REPO}/main/{DB_FILE}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status == 200:
+                content = await resp.read()
+                async with aiofiles.open(DB_FILE, "wb") as f:
+                    await f.write(content)
+                logger.info("Downloaded bot_data.db from GitHub")
+            else:
+                logger.warning("No existing bot_data.db found on GitHub; starting fresh")
 
-async def save_json(file_path: str, data, dir_path: Optional[str] = None):
-    try:
-        temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8', dir=dir_path)
-        json.dump(data, temp_file, indent=2)
-        temp_file.close()
-        async with aiofiles.open(temp_file.name, "r", encoding='utf-8') as f:
-            content = await f.read()
-        async with aiofiles.open(file_path, "w", encoding='utf-8') as f:
-            await f.write(content)
-        os.unlink(temp_file.name)
-    except Exception as e:
-        logger.error(f"Failed to save to {file_path}: {e}")
+async def upload_db():
+    if not GITHUB_TOKEN:
+        logger.warning("GITHUB_TOKEN not set; cannot upload DB")
+        return
+    if not os.path.exists(DB_FILE):
+        logger.warning("DB file not found; nothing to upload")
+        return
+    async with aiofiles.open(DB_FILE, "rb") as f:
+        content = await f.read()
+    encoded = base64.b64encode(content).decode('utf-8')
+    async with aiohttp.ClientSession() as session:
+        headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+        url = f"https://api.github.com/repos/{REPO}/contents/{DB_FILE}"
+        async with session.get(url, headers=headers) as resp:
+            sha = (await resp.json()).get("sha") if resp.status == 200 else None
+        data = {
+            "message": "Update bot_data.db",
+            "content": encoded,
+            "sha": sha
+        } if sha else {
+            "message": "Create bot_data.db",
+            "content": encoded
+        }
+        async with session.put(url, headers=headers, json=data) as resp:
+            if resp.status in (200, 201):
+                logger.info("Uploaded bot_data.db to GitHub")
+            else:
+                logger.error(f"Failed to upload DB: {await resp.text()}")
+
+async def periodic_db_upload():
+    while True:
+        await upload_db()
+        await asyncio.sleep(300)  # Every 5 minutes
+
+# SQLite setup
+async def init_db():
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                guild_id INTEGER PRIMARY KEY,
+                prefix TEXT,
+                level_channel INTEGER
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS xp (
+                guild_id INTEGER,
+                user_id INTEGER,
+                xp INTEGER,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS mod_stats (
+                guild_id INTEGER,
+                user_id INTEGER,
+                action TEXT,
+                timestamp TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS last_seen (
+                guild_id INTEGER PRIMARY KEY,
+                timestamp TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS last_deleted_photo (
+                guild_id INTEGER,
+                author TEXT,
+                content TEXT,
+                image_url TEXT,
+                timestamp TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS afk (
+                user_id INTEGER PRIMARY KEY,
+                reason TEXT,
+                since TEXT
+            )
+        """)
+        await db.commit()
 
 # Settings management
 async def load_settings():
-    data = await load_json(SETTINGS_FILE, {})
-    for str_g, s in data.items():
-        gid = int(str_g)
-        prefixes[gid] = s.get("prefix", DEFAULT_PREFIX)
-        level_channels[gid] = s.get("level_channel", None)
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT guild_id, prefix, level_channel FROM settings") as cursor:
+            async for row in cursor:
+                guild_id, prefix, level_channel = row
+                prefixes[guild_id] = prefix or DEFAULT_PREFIX
+                level_channels[guild_id] = level_channel
 
 async def save_settings():
-    all_guilds = set(prefixes.keys()) | set(level_channels.keys())
-    data = {str(k): {"prefix": prefixes.get(k, DEFAULT_PREFIX), "level_channel": level_channels.get(k, None)} for k in all_guilds}
-    await save_json(SETTINGS_FILE, data)
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("DELETE FROM settings")
+        for guild_id in set(prefixes.keys()) | set(level_channels.keys()):
+            await db.execute(
+                "INSERT OR REPLACE INTO settings (guild_id, prefix, level_channel) VALUES (?, ?, ?)",
+                (guild_id, prefixes.get(guild_id, DEFAULT_PREFIX), level_channels.get(guild_id))
+            )
+        await db.commit()
 
 # XP handling
 async def load_xp(guild_id: int):
     if guild_id in xp_data:
         return
-    filename = os.path.join(XP_DIR, f"guild_{guild_id}.json")
-    data = await load_json(filename, {})
-    xp_data[guild_id] = {int(k): int(v) for k, v in data.items()}
+    xp_data[guild_id] = {}
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT user_id, xp FROM xp WHERE guild_id = ?", (guild_id,)) as cursor:
+            async for row in cursor:
+                xp_data[guild_id][row[0]] = row[1]
 
 async def save_xp(guild_id: int):
     if guild_id not in xp_data:
         return
-    filename = os.path.join(XP_DIR, f"guild_{guild_id}.json")
-    data = {str(k): v for k, v in xp_data[guild_id].items()}
-    await save_json(filename, data, XP_DIR)
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("DELETE FROM xp WHERE guild_id = ?", (guild_id,))
+        for user_id, xp in xp_data[guild_id].items():
+            await db.execute(
+                "INSERT OR REPLACE INTO xp (guild_id, user_id, xp) VALUES (?, ?, ?)",
+                (guild_id, user_id, xp)
+            )
+        await db.commit()
 
 def get_user_xp(guild_id: int, user_id: int) -> int:
     if guild_id not in xp_data:
@@ -197,17 +287,29 @@ async def notify_level_up(guild_id: int, user_id: int, new_level: int):
 
 # Mod stats handling
 async def load_mod_stats(guild_id: int):
-    filename = os.path.join(MOD_STATS_DIR, f"guild_{guild_id}.json")
-    data = await load_json(filename, {})
-    mod_stats[guild_id] = {
-        int(user_id): {action: stats.get(action, []) for action in ["commands", "warned", "kicked", "banned", "unbanned", "timed_out", "untimed_out", "jailed", "unjailed"]}
-        for user_id, stats in data.items()
-    }
+    mod_stats[guild_id] = {}
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT user_id, action, timestamp FROM mod_stats WHERE guild_id = ?", (guild_id,)) as cursor:
+            async for row in cursor:
+                user_id, action, timestamp = row
+                mod_stats[guild_id].setdefault(user_id, {
+                    "commands": [], "warned": [], "kicked": [], "banned": [], "unbanned": [],
+                    "timed_out": [], "untimed_out": [], "jailed": [], "unjailed": []
+                })[action].append(timestamp)
 
 async def save_mod_stats(guild_id: int):
-    filename = os.path.join(MOD_STATS_DIR, f"guild_{guild_id}.json")
-    data = {str(k): v for k, v in mod_stats.get(guild_id, {}).items()}
-    await save_json(filename, data, MOD_STATS_DIR)
+    if guild_id not in mod_stats:
+        return
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("DELETE FROM mod_stats WHERE guild_id = ?", (guild_id,))
+        for user_id, actions in mod_stats[guild_id].items():
+            for action, timestamps in actions.items():
+                for timestamp in timestamps:
+                    await db.execute(
+                        "INSERT INTO mod_stats (guild_id, user_id, action, timestamp) VALUES (?, ?, ?, ?)",
+                        (guild_id, user_id, action, timestamp)
+                    )
+        await db.commit()
 
 def update_mod_stats(guild_id: int, user_id: int, action: str):
     mod_stats_guild = mod_stats.setdefault(guild_id, {})
@@ -219,32 +321,66 @@ def update_mod_stats(guild_id: int, user_id: int, action: str):
 
 # Last seen handling
 async def load_last_seen():
-    last_seen.update({int(k): v for k, v in (await load_json(LAST_SEEN_FILE, {})).items()})
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT guild_id, timestamp FROM last_seen") as cursor:
+            async for row in cursor:
+                last_seen[row[0]] = row[1]
 
 async def save_last_seen():
-    await save_json(LAST_SEEN_FILE, {str(k): v for k, v in last_seen.items()})
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("DELETE FROM last_seen")
+        for guild_id, timestamp in last_seen.items():
+            await db.execute(
+                "INSERT OR REPLACE INTO last_seen (guild_id, timestamp) VALUES (?, ?)",
+                (guild_id, timestamp)
+            )
+        await db.commit()
 
 # Last deleted photo handling
 async def load_last_deleted_photo(guild_id: int):
-    filename = os.path.join(LAST_DELETED_PHOTO_DIR, f"guild_{guild_id}.json")
-    data = await load_json(filename, [])
-    last_deleted_photo[guild_id] = data if isinstance(data, list) else []
+    last_deleted_photo[guild_id] = []
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute(
+            "SELECT author, content, image_url, timestamp FROM last_deleted_photo WHERE guild_id = ? ORDER BY timestamp DESC LIMIT 10",
+            (guild_id,)
+        ) as cursor:
+            async for row in cursor:
+                last_deleted_photo[guild_id].append({
+                    "author": row[0], "content": row[1], "image_url": row[2], "timestamp": row[3]
+                })
 
 async def save_last_deleted_photo(guild_id: int):
     if guild_id not in last_deleted_photo:
         return
-    filename = os.path.join(LAST_DELETED_PHOTO_DIR, f"guild_{guild_id}.json")
-    await save_json(filename, last_deleted_photo[guild_id], LAST_DELETED_PHOTO_DIR)
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("DELETE FROM last_deleted_photo WHERE guild_id = ?", (guild_id,))
+        for photo in last_deleted_photo[guild_id][:10]:
+            await db.execute(
+                "INSERT INTO last_deleted_photo (guild_id, author, content, image_url, timestamp) VALUES (?, ?, ?, ?, ?)",
+                (guild_id, photo["author"], photo["content"], photo["image_url"], photo["timestamp"])
+            )
+        await db.commit()
 
 # AFK handling
 async def load_afk():
     global afk_cache
-    afk_cache = {int(k): v for k, v in (await load_json(AFK_FILE, {})).items()}
+    afk_cache.clear()
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT user_id, reason, since FROM afk") as cursor:
+            async for row in cursor:
+                afk_cache[row[0]] = {"reason": row[1], "since": row[2]}
 
 async def save_afk():
-    await save_json(AFK_FILE, {str(k): v for k, v in afk_cache.items()})
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("DELETE FROM afk")
+        for user_id, data in afk_cache.items():
+            await db.execute(
+                "INSERT OR REPLACE INTO afk (user_id, reason, since) VALUES (?, ?, ?)",
+                (user_id, data["reason"], data["since"])
+            )
+        await db.commit()
 
-# Bot setup
+# Intents
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
@@ -798,14 +934,18 @@ async def me_handler(interaction_or_ctx):
 # Events
 @bot.event
 async def on_ready():
+    await download_db()
+    await init_db()
     logger.info(f"Logged in as {bot.user}")
     await load_afk()
+    await load_settings()
     for guild in bot.guilds:
         await load_mod_stats(guild.id)
         await load_xp(guild.id)
         await load_last_deleted_photo(guild.id)
         last_seen[guild.id] = datetime.now(timezone.utc).isoformat()
     await save_last_seen()
+    bot.loop.create_task(periodic_db_upload())
     for attempt in range(3):
         try:
             bot.tree.clear_commands(guild=None)
