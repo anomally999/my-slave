@@ -954,7 +954,6 @@ async def sync_prefix(ctx):
 @commands.cooldown(1, 30.0, commands.BucketType.guild)
 async def prefix_prefix(ctx):
     await getprefix_handler(ctx)
-    git add main.py
 
 # Events
 @bot.event
