@@ -948,7 +948,14 @@ async def sync_prefix(ctx):
     except Exception as e:
         logger.error(f"Sync failed: {e}")
         await ctx.send(f"Sync failed: {e}", delete_after=10)
-        
+
+# Near the getprefix_prefix command (around line 780)
+@bot.command(name="prefix", aliases=["getprefix"])
+@commands.cooldown(1, 30.0, commands.BucketType.guild)
+async def prefix_prefix(ctx):
+    await getprefix_handler(ctx)
+    git add main.py
+
 # Events
 @bot.event
 async def on_ready():
