@@ -394,7 +394,8 @@ async def has_permission(interaction_or_ctx, perm: str) -> bool:
     user = getattr(interaction_or_ctx, "user", interaction_or_ctx.author)
     if getattr(user.guild_permissions, perm, False):
         return True
-    embed = discord.Embed(title="Permission Denied", description=f"Requires `{perm}` permission.", color=discord.Color.red())
+    embed = discord.Embed(title="❌ Permission Denied", description=f"Requires `{perm}` permission.", color=discord.Color.red())
+    embed.set_footer(text="Contact an admin if you believe this is an error.")
     await (interaction_or_ctx.response.send_message(embed=embed, ephemeral=True) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed, delete_after=10))
     return False
 
@@ -427,31 +428,33 @@ def _wrap_text(text: str, font: ImageFont.FreeTypeFont, max_w: int) -> list[str]
 async def get_jailed_role(guild: discord.Guild) -> discord.Role:
     jailed = discord.utils.get(guild.roles, name="Jailed")
     if not jailed:
-        jailed = await guild.create_role(name="Jailed", reason="Auto-jailed role")
+        jailed = await guild.create_role(name="Jailed", reason="Auto-jailed role", color=discord.Color.dark_grey())
         for ch in guild.channels:
             await ch.set_permissions(jailed, send_messages=False, speak=False, add_reactions=False)
     return jailed
 
 async def send_dm(member: discord.Member, action: str, mod: discord.Member, reason: Optional[str]):
     try:
-        embed = discord.Embed(title=f"You have been {action}", color=discord.Color.orange(), timestamp=datetime.now(timezone.utc))
+        embed = discord.Embed(title=f"🚨 You have been {action}", color=discord.Color.orange(), timestamp=datetime.now(timezone.utc))
         embed.add_field(name="Moderator", value=f"{mod} ({mod.id})", inline=False)
         embed.add_field(name="Reason", value=reason or "No reason provided", inline=False)
-        embed.set_footer(text=f"Guild: {member.guild.name}")
+        embed.set_footer(text=f"Guild: {member.guild.name}", icon_url=member.guild.icon.url if member.guild.icon else None)
         await member.send(embed=embed)
     except discord.Forbidden:
         logger.warning(f"Failed to send DM to {member.id} for {action}")
 
 async def mod_action_embed(target: discord.abc.User, action: str, reason: Optional[str], mod: discord.Member):
+    color = discord.Color.red() if action in {"kick", "ban"} else discord.Color.orange()
     embed = discord.Embed(
-        title=f"{action.capitalize()} Executed",
-        color=discord.Color.red() if action in {"kick", "ban"} else discord.Color.orange(),
+        title=f"{action.capitalize()} Executed ⚡",
+        color=color,
         timestamp=datetime.now(timezone.utc)
     )
-    embed.add_field(name="Member", value=f"{target} ({target.id})", inline=False)
-    embed.add_field(name="Moderator", value=f"{mod} ({mod.id})", inline=False)
+    embed.add_field(name="Member", value=f"{target} ({target.id})", inline=True)
+    embed.add_field(name="Moderator", value=f"{mod} ({mod.id})", inline=True)
     embed.add_field(name="Reason", value=reason or "No reason provided", inline=False)
     embed.set_thumbnail(url=target.display_avatar.url if hasattr(target, 'display_avatar') else None)
+    embed.set_footer(text="Moderation action logged.", icon_url="https://i.imgur.com/3J2N8fI.png")  # Replace with a suitable icon URL
     return embed
 
 # Command handlers
@@ -465,18 +468,22 @@ async def setprefix_handler(interaction_or_ctx, new_prefix: str):
         return await interaction_or_ctx.response.send_message("Prefix must be ≤10 characters.", ephemeral=True)
     prefixes[guild.id] = new_prefix
     await save_settings()
-    embed = discord.Embed(title="Prefix Updated", description=f"New prefix: `{new_prefix}`", color=discord.Color.green())
+    embed = discord.Embed(title="✅ Prefix Updated", description=f"New prefix: `{new_prefix}`\n\nAll commands will now use this prefix.", color=discord.Color.green())
+    embed.set_footer(text="Change it anytime with /setprefix!")
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 async def getprefix_handler(interaction_or_ctx):
     guild = interaction_or_ctx.guild
     prefix = DEFAULT_PREFIX if not guild else prefixes.get(guild.id, DEFAULT_PREFIX)
-    embed = discord.Embed(title="Current Prefix", description=f"Prefix: `{prefix}`\nSlash commands: `/`", color=discord.Color.blue())
+    embed = discord.Embed(title="📌 Current Prefix", description=f"Prefix: `{prefix}`\nSlash commands: `/`\n\nUse /setprefix to change it (admin only).", color=discord.Color.blue())
+    embed.set_footer(text="Prefixes are server-specific.")
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 async def ping_handler(interaction_or_ctx):
     latency = round(bot.latency * 1000)
-    embed = discord.Embed(title="Pong!", description=f"Latency: **{latency}ms**", color=discord.Color.green())
+    color = discord.Color.green() if latency < 100 else discord.Color.orange() if latency < 200 else discord.Color.red()
+    embed = discord.Embed(title="🏓 Pong!", description=f"Latency: **{latency}ms**\n\nBot is responsive!", color=color)
+    embed.set_footer(text="Ping tested at " + datetime.now(timezone.utc).strftime("%H:%M UTC"))
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 async def help_handler(interaction_or_ctx):
@@ -484,25 +491,51 @@ async def help_handler(interaction_or_ctx):
     guild = interaction_or_ctx.guild
     is_admin = guild and (user.guild_permissions.kick_members or user.guild_permissions.ban_members or user.guild_permissions.manage_guild or user == guild.owner)
     prefix = prefixes.get(guild.id if guild else 0, DEFAULT_PREFIX)
-    embed = discord.Embed(title="Command Guide", description=f"Use `{prefix}` or `/`", color=discord.Color.blue(), timestamp=datetime.now(timezone.utc))
+    embed = discord.Embed(title="🛠️ Command Guide", description=f"Use `{prefix}` for prefix commands or `/` for slash commands.\n\nType a command for more info!", color=discord.Color.from_rgb(0, 170, 255), timestamp=datetime.now(timezone.utc))
+    embed.set_thumbnail(url="https://i.imgur.com/5BFecvA.png")  # Replace with a bot icon or help image
     general_cmds = [
-        ("ping", "Bot latency"), ("help", "Show commands"), ("afk [reason]", "Set AFK"), ("inrole [role]", "Role members"),
-        ("userinfo [member]", "User info"), ("serverinfo", "Server info"), ("avatar [member]", "User avatar"),
-        ("banner [member]", "User banner"), ("quote <text> [member]", "Create quote"), ("modstats [user]", "Mod stats"),
-        ("getprefix", "Show prefix"), ("rank [user]", "Show level"), ("leaderboard", "Top users"), ("rewards", "Level rewards"),
-        ("meme [keywords]", "Random meme"), ("coinflip", "Flip coin"), ("dice", "Roll die"), ("showlm [number]", "Deleted photo"), ("me", "Your profile")
+        ("ping", "Bot latency check 🏓"),
+        ("help", "Show this guide 📚"),
+        ("afk [reason]", "Set AFK status 😴"),
+        ("inrole [role]", "List role members 👥"),
+        ("userinfo [member]", "User profile info 👤"),
+        ("serverinfo", "Server details 🖥️"),
+        ("avatar [member]", "User avatar image 🖼️"),
+        ("banner [member]", "User banner image 📸"),
+        ("quote <text> [member]", "Create a quote image 💬"),
+        ("modstats [user]", "Moderation stats 📊"),
+        ("getprefix", "Show current prefix 🔑"),
+        ("rank [user]", "Show level and XP 🏅"),
+        ("leaderboard", "Top users leaderboard 🏆"),
+        ("rewards", "Level rewards list 🎁"),
+        ("meme [keywords]", "Random meme 😂"),
+        ("coinflip", "Flip a coin 🪙"),
+        ("dice", "Roll a die 🎲"),
+        ("showlm [number]", "View deleted photo 🗑️"),
+        ("me", "Your profile summary 📝")
     ]
-    embed.add_field(name="General Commands", value="\n".join(f"`{cmd}` - {desc}" for cmd, desc in general_cmds), inline=False)
+    embed.add_field(name="🌟 General Commands", value="\n".join(f"**`{cmd}`** - {desc}" for cmd, desc in general_cmds), inline=False)
     if is_admin:
         admin_cmds = [
-            ("kick <member> [reason]", "Kick user"), ("ban <member> [reason]", "Ban user"), ("unban <user> [reason]", "Unban user"),
-            ("warn <member> [reason]", "Warn user"), ("timeout <member> <duration> [reason]", "Timeout user"),
-            ("untimeout <member> [reason]", "Remove timeout"), ("jail <member> [reason]", "Jail user"),
-            ("unjail <member> [reason]", "Unjail user"), ("setprefix <prefix>", "Change prefix"), ("purge <amount>", "Delete messages"),
-            ("lock", "Lock channel"), ("unlock", "Unlock channel"), ("xp_add <user> <amount>", "Add XP"),
-            ("xp_remove <user> <amount>", "Remove XP"), ("level_set <user> <level>", "Set level"), ("levelchannelset <channel>", "Set level channel")
+            ("kick <member> [reason]", "Kick user 👢"),
+            ("ban <member> [reason]", "Ban user 🔨"),
+            ("unban <user> [reason]", "Unban user 🔓"),
+            ("warn <member> [reason]", "Warn user ⚠️"),
+            ("timeout <member> <duration> [reason]", "Timeout user ⏳"),
+            ("untimeout <member> [reason]", "Remove timeout ⏰"),
+            ("jail <member> [reason]", "Jail user 🔒"),
+            ("unjail <member> [reason]", "Unjail user 🗝️"),
+            ("setprefix <prefix>", "Change prefix 🔧"),
+            ("purge <amount>", "Delete messages 🧹"),
+            ("lock", "Lock channel 🚫"),
+            ("unlock", "Unlock channel ✅"),
+            ("xp_add <user> <amount>", "Add XP 📈"),
+            ("xp_remove <user> <amount>", "Remove XP 📉"),
+            ("level_set <user> <level>", "Set level ⚙️"),
+            ("levelchannelset <channel>", "Set level channel 📢")
         ]
-        embed.add_field(name="Admin Commands", value="\n".join(f"`{cmd}` - {desc}" for cmd, desc in admin_cmds), inline=False)
+        embed.add_field(name="🔰 Admin Commands", value="\n".join(f"**`{cmd}`** - {desc}" for cmd, desc in admin_cmds), inline=False)
+    embed.set_footer(text="Bot by xAI | Use responsibly!", icon_url="https://i.imgur.com/klY5xCe.png")
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 async def purge_handler(interaction_or_ctx, amount: int):
@@ -514,7 +547,8 @@ async def purge_handler(interaction_or_ctx, amount: int):
         return await interaction_or_ctx.response.send_message("Amount must be 1-100.", ephemeral=True)
     channel = interaction_or_ctx.channel
     deleted = await channel.purge(limit=amount)
-    embed = discord.Embed(title="Messages Purged", description=f"Deleted {len(deleted)} message(s).", color=discord.Color.green())
+    embed = discord.Embed(title="🧹 Messages Purged", description=f"Deleted {len(deleted)} message(s).\n\nChannel cleaned up!", color=discord.Color.green())
+    embed.set_footer(text="Purged at " + datetime.now(timezone.utc).strftime("%H:%M UTC"))
     await (interaction_or_ctx.response.send_message(embed=embed, ephemeral=True) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed, delete_after=10))
 
 async def lock_handler(interaction_or_ctx):
@@ -524,7 +558,8 @@ async def lock_handler(interaction_or_ctx):
         return
     channel = interaction_or_ctx.channel
     await channel.set_permissions(interaction_or_ctx.guild.default_role, send_messages=False)
-    embed = discord.Embed(title="Channel Locked", description=f"{channel.mention} is locked.", color=discord.Color.orange())
+    embed = discord.Embed(title="🔒 Channel Locked", description=f"{channel.mention} is now locked.\nNo messages can be sent by @everyone.", color=discord.Color.orange())
+    embed.set_footer(text="Use /unlock to reopen.")
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 async def unlock_handler(interaction_or_ctx):
@@ -534,7 +569,8 @@ async def unlock_handler(interaction_or_ctx):
         return
     channel = interaction_or_ctx.channel
     await channel.set_permissions(interaction_or_ctx.guild.default_role, send_messages=None)
-    embed = discord.Embed(title="Channel Unlocked", description=f"{channel.mention} is unlocked.", color=discord.Color.green())
+    embed = discord.Embed(title="✅ Channel Unlocked", description=f"{channel.mention} is now unlocked.\nMessaging restored for @everyone.", color=discord.Color.green())
+    embed.set_footer(text="Channel open!")
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 async def rank_handler(interaction_or_ctx, member: Optional[discord.Member] = None):
@@ -543,11 +579,12 @@ async def rank_handler(interaction_or_ctx, member: Optional[discord.Member] = No
     target = member or getattr(interaction_or_ctx, "user", interaction_or_ctx.author)
     xp = get_user_xp(interaction_or_ctx.guild.id, target.id)
     level, xp_in_level, next_needed, progress = get_level_info(xp)
-    embed = discord.Embed(title=f"{target.display_name}'s Rank", color=discord.Color.blue(), timestamp=datetime.now(timezone.utc))
-    embed.add_field(name="Level", value=str(level), inline=True)
-    embed.add_field(name="XP", value=f"{xp_in_level}/{xp_in_level + next_needed}", inline=True)
-    embed.add_field(name="Progress", value=f"{progress_bar(progress)} {progress:.1f}%", inline=False)
+    embed = discord.Embed(title=f"🏅 {target.display_name}'s Rank", color=discord.Color.from_rgb(255, 215, 0), timestamp=datetime.now(timezone.utc))
+    embed.add_field(name="Level", value=f"**{level}** 🎖️", inline=True)
+    embed.add_field(name="XP", value=f"**{xp_in_level} / {xp_in_level + next_needed}** 📊", inline=True)
+    embed.add_field(name="Progress to Next Level", value=f"{progress_bar(progress)} **{progress:.1f}%** 🚀", inline=False)
     embed.set_thumbnail(url=target.display_avatar.url)
+    embed.set_footer(text="Earn XP by chatting! Next reward at Level 5.")
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 async def leaderboard_handler(interaction_or_ctx):
@@ -558,10 +595,14 @@ async def leaderboard_handler(interaction_or_ctx):
     user_xps = [(interaction_or_ctx.guild.get_member(uid), x) for uid, x in xp_data[guild_id].items() if interaction_or_ctx.guild.get_member(uid)]
     sorted_users = sorted(user_xps, key=lambda x: x[1], reverse=True)[:10]
     if not sorted_users:
-        embed = discord.Embed(title="Leaderboard", description="No rankings yet.", color=discord.Color.gold())
+        embed = discord.Embed(title="🏆 Leaderboard", description="No rankings yet. Start chatting to earn XP!", color=discord.Color.gold())
         return await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
-    desc = "\n".join(f"{i+1}. **{m.display_name}** - {x} XP (Lv. {get_level(x)})" for i, (m, x) in enumerate(sorted_users))
-    embed = discord.Embed(title="Leaderboard", description=desc, color=discord.Color.gold(), timestamp=datetime.now(timezone.utc))
+    desc = ""
+    for i, (m, x) in enumerate(sorted_users):
+        medal = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"{i+1}."
+        desc += f"{medal} **{m.display_name}** - {x} XP (Lv. {get_level(x)})\n"
+    embed = discord.Embed(title="🏆 Server Leaderboard", description=desc, color=discord.Color.gold(), timestamp=datetime.now(timezone.utc))
+    embed.set_footer(text="Top 10 users | Climb the ranks!")
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 async def xp_add_handler(interaction_or_ctx, member: discord.Member, amount: int):
@@ -575,7 +616,8 @@ async def xp_add_handler(interaction_or_ctx, member: discord.Member, amount: int
     await add_user_xp(guild_id, member.id, amount)
     xp = get_user_xp(guild_id, member.id)
     level, _, next_needed, _ = get_level_info(xp)
-    embed = discord.Embed(title="XP Added", description=f"Added {amount} XP to {member.mention}. Total: {xp} XP (Lv. {level})", color=discord.Color.green())
+    embed = discord.Embed(title="📈 XP Added", description=f"Added **{amount} XP** to {member.mention}.\nTotal: **{xp} XP** (Lv. {level})", color=discord.Color.green())
+    embed.set_footer(text="XP boost applied!")
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 async def xp_remove_handler(interaction_or_ctx, member: discord.Member, amount: int):
@@ -590,7 +632,8 @@ async def xp_remove_handler(interaction_or_ctx, member: discord.Member, amount: 
     new_xp = max(0, current - amount)
     set_user_xp(guild_id, member.id, new_xp)
     level, _, next_needed, _ = get_level_info(new_xp)
-    embed = discord.Embed(title="XP Removed", description=f"Removed {amount} XP from {member.mention}. Total: {new_xp} XP (Lv. {level})", color=discord.Color.red())
+    embed = discord.Embed(title="📉 XP Removed", description=f"Removed **{amount} XP** from {member.mention}.\nTotal: **{new_xp} XP** (Lv. {level})", color=discord.Color.red())
+    embed.set_footer(text="XP adjustment made.")
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 async def level_set_handler(interaction_or_ctx, member: discord.Member, level: int):
@@ -603,14 +646,16 @@ async def level_set_handler(interaction_or_ctx, member: discord.Member, level: i
     guild_id = interaction_or_ctx.guild.id
     target_xp = xp_for_level(level)
     set_user_xp(guild_id, member.id, target_xp)
-    embed = discord.Embed(title="Level Set", description=f"{member.mention}'s level set to {level}.", color=discord.Color.blue())
+    embed = discord.Embed(title="⚙️ Level Set", description=f"{member.mention}'s level set to **{level}**.\nNew XP: **{target_xp}**", color=discord.Color.blue())
+    embed.set_footer(text="Level adjusted!")
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 async def rewards_handler(interaction_or_ctx):
     if not interaction_or_ctx.guild:
         return
-    desc = "\n".join(f"Level {k}: **{v}** Role" for k, v in level_rewards.items())
-    embed = discord.Embed(title="Level Rewards", description=desc or "No rewards set.", color=discord.Color.purple())
+    desc = "\n".join(f"**Level {k}**: {v} Role 🎖️" for k, v in level_rewards.items())
+    embed = discord.Embed(title="🎁 Level Rewards", description=desc or "No rewards set yet.", color=discord.Color.purple())
+    embed.set_footer(text="Earn XP to unlock!")
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 async def levelchannelset_handler(interaction_or_ctx, channel: discord.TextChannel):
@@ -620,7 +665,8 @@ async def levelchannelset_handler(interaction_or_ctx, channel: discord.TextChann
         return
     level_channels[interaction_or_ctx.guild.id] = channel.id
     await save_settings()
-    embed = discord.Embed(title="Level Channel Set", description=f"Level notifications set to {channel.mention}.", color=discord.Color.green())
+    embed = discord.Embed(title="📢 Level Channel Set", description=f"Level notifications will now go to {channel.mention}.", color=discord.Color.green())
+    embed.set_footer(text="Channel updated!")
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 async def meme_handler(interaction_or_ctx, keywords: Optional[str] = None):
@@ -638,9 +684,10 @@ async def meme_handler(interaction_or_ctx, keywords: Optional[str] = None):
                 data = await resp.json()
         except Exception as e:
             logger.error(f"Failed to fetch meme: {e}")
-            embed = discord.Embed(title="Error", description="Failed to fetch meme.", color=discord.Color.red())
+            embed = discord.Embed(title="❌ Error", description="Failed to fetch meme. Try again later!", color=discord.Color.red())
             return await send_func(embed=embed)
     embed = discord.Embed(title=data["title"], color=discord.Color.orange(), timestamp=datetime.now(timezone.utc))
+    embed.set_footer(text="Meme from r/" + data["subreddit"] if "subreddit" in data else "Random meme")
     if data["url"].endswith(('.jpg', '.png', '.gif', '.webp')):
         embed.set_image(url=data["url"])
     else:
@@ -649,12 +696,14 @@ async def meme_handler(interaction_or_ctx, keywords: Optional[str] = None):
 
 async def coinflip_handler(interaction_or_ctx):
     result = "Heads" if random.randint(0, 1) else "Tails"
-    embed = discord.Embed(title="Coin Flip", description=f"**{result}**!", color=discord.Color.gold())
+    embed = discord.Embed(title="🪙 Coin Flip", description=f"Result: **{result}**!", color=discord.Color.gold())
+    embed.set_footer(text="Flip again?")
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 async def dice_handler(interaction_or_ctx):
     result = random.randint(1, 6)
-    embed = discord.Embed(title="Dice Roll", description=f"Rolled a **{result}**!", color=discord.Color.red())
+    embed = discord.Embed(title="🎲 Dice Roll", description=f"Rolled a **{result}**!", color=discord.Color.red())
+    embed.set_footer(text="Roll again?")
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 async def showlm_handler(interaction_or_ctx, number: int = 1):
@@ -664,19 +713,21 @@ async def showlm_handler(interaction_or_ctx, number: int = 1):
     await load_last_deleted_photo(guild_id)
     photos = last_deleted_photo.get(guild_id, [])
     if not photos or number < 1 or number > len(photos):
-        msg = f"Invalid number. Available: 1 to {len(photos)}" if photos else "No deleted photos."
-        return await (interaction_or_ctx.response.send_message(msg, ephemeral=True) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(msg, delete_after=8))
+        embed = discord.Embed(title="🗑️ Deleted Photos", description="No deleted photos or invalid number.", color=discord.Color.red())
+        return await (interaction_or_ctx.response.send_message(embed=embed, ephemeral=True) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed, delete_after=8))
     data = photos[number - 1]
-    embed = discord.Embed(title=f"Deleted Photo #{number}", description=data["content"], color=discord.Color.red(), timestamp=datetime.fromisoformat(data["timestamp"]))
-    embed.add_field(name="Author", value=data["author"], inline=False)
+    embed = discord.Embed(title=f"🗑️ Deleted Photo #{number}", description=data["content"], color=discord.Color.red(), timestamp=datetime.fromisoformat(data["timestamp"]))
+    embed.add_field(name="Author", value=data["author"], inline=True)
     embed.set_image(url=data["image_url"])
+    embed.set_footer(text="Recovered from deleted message.")
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 async def afk_handler(interaction_or_ctx, reason: str = "AFK"):
     user = getattr(interaction_or_ctx, "user", interaction_or_ctx.author)
     afk_cache[user.id] = {"reason": reason, "since": datetime.now(timezone.utc).isoformat()}
     await save_afk()
-    embed = discord.Embed(title="AFK Set", description=f"Reason: {reason}", color=discord.Color.blue())
+    embed = discord.Embed(title="😴 AFK Set", description=f"Reason: **{reason}**\n\nWe'll let others know!", color=discord.Color.blue())
+    embed.set_footer(text="Type any message to return.")
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 async def kick_handler(interaction_or_ctx, member: discord.Member, reason: Optional[str]):
@@ -694,7 +745,7 @@ async def kick_handler(interaction_or_ctx, member: discord.Member, reason: Optio
         embed = await mod_action_embed(member, "kick", reason, user)
         await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
     except discord.Forbidden:
-        embed = discord.Embed(title="Error", description="Bot lacks permission to kick this member.", color=discord.Color.red())
+        embed = discord.Embed(title="❌ Error", description="Bot lacks permission to kick this member.", color=discord.Color.red())
         await (interaction_or_ctx.response.send_message(embed=embed, ephemeral=True) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed, delete_after=10))
 
 async def ban_handler(interaction_or_ctx, member: discord.Member, reason: Optional[str]):
@@ -712,7 +763,7 @@ async def ban_handler(interaction_or_ctx, member: discord.Member, reason: Option
         embed = await mod_action_embed(member, "ban", reason, user)
         await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
     except discord.Forbidden:
-        embed = discord.Embed(title="Error", description="Bot lacks permission to ban this member.", color=discord.Color.red())
+        embed = discord.Embed(title="❌ Error", description="Bot lacks permission to ban this member.", color=discord.Color.red())
         await (interaction_or_ctx.response.send_message(embed=embed, ephemeral=True) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed, delete_after=10))
 
 async def unban_handler(interaction_or_ctx, user: discord.User, reason: Optional[str]):
@@ -730,7 +781,7 @@ async def unban_handler(interaction_or_ctx, user: discord.User, reason: Optional
         embed = await mod_action_embed(user, "unban", reason, mod)
         await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
     except discord.Forbidden:
-        embed = discord.Embed(title="Error", description="Bot lacks permission to unban this user.", color=discord.Color.red())
+        embed = discord.Embed(title="❌ Error", description="Bot lacks permission to unban this user.", color=discord.Color.red())
         await (interaction_or_ctx.response.send_message(embed=embed, ephemeral=True) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed, delete_after=10))
 
 async def warn_handler(interaction_or_ctx, member: discord.Member, reason: Optional[str]):
@@ -764,7 +815,7 @@ async def timeout_handler(interaction_or_ctx, member: discord.Member, duration: 
         embed = await mod_action_embed(member, f"timeout ({duration} min)", reason, mod)
         await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
     except discord.Forbidden:
-        embed = discord.Embed(title="Error", description="Bot lacks permission to timeout this member.", color=discord.Color.red())
+        embed = discord.Embed(title="❌ Error", description="Bot lacks permission to timeout this member.", color=discord.Color.red())
         await (interaction_or_ctx.response.send_message(embed=embed, ephemeral=True) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed, delete_after=10))
 
 async def untimeout_handler(interaction_or_ctx, member: discord.Member, reason: Optional[str]):
@@ -782,7 +833,7 @@ async def untimeout_handler(interaction_or_ctx, member: discord.Member, reason: 
         embed = await mod_action_embed(member, "timeout removed", reason, mod)
         await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
     except discord.Forbidden:
-        embed = discord.Embed(title="Error", description="Bot lacks permission to remove timeout.", color=discord.Color.red())
+        embed = discord.Embed(title="❌ Error", description="Bot lacks permission to remove timeout.", color=discord.Color.red())
         await (interaction_or_ctx.response.send_message(embed=embed, ephemeral=True) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed, delete_after=10))
 
 async def jail_handler(interaction_or_ctx, member: discord.Member, reason: Optional[str]):
@@ -801,7 +852,7 @@ async def jail_handler(interaction_or_ctx, member: discord.Member, reason: Optio
         embed = await mod_action_embed(member, "jailed", reason, mod)
         await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
     except discord.Forbidden:
-        embed = discord.Embed(title="Error", description="Bot lacks permission to jail this member.", color=discord.Color.red())
+        embed = discord.Embed(title="❌ Error", description="Bot lacks permission to jail this member.", color=discord.Color.red())
         await (interaction_or_ctx.response.send_message(embed=embed, ephemeral=True) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed, delete_after=10))
 
 async def unjail_handler(interaction_or_ctx, member: discord.Member, reason: Optional[str]):
@@ -820,7 +871,7 @@ async def unjail_handler(interaction_or_ctx, member: discord.Member, reason: Opt
         embed = await mod_action_embed(member, "unjailed", reason, mod)
         await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
     except discord.Forbidden:
-        embed = discord.Embed(title="Error", description="Bot lacks permission to unjail this member.", color=discord.Color.red())
+        embed = discord.Embed(title="❌ Error", description="Bot lacks permission to unjail this member.", color=discord.Color.red())
         await (interaction_or_ctx.response.send_message(embed=embed, ephemeral=True) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed, delete_after=10))
 
 async def inrole_handler(interaction_or_ctx, role: Optional[discord.Role]):
@@ -829,50 +880,56 @@ async def inrole_handler(interaction_or_ctx, role: Optional[discord.Role]):
     target = role or getattr(interaction_or_ctx, "user", interaction_or_ctx.author).top_role
     members = target.members[:25]
     desc = "\n".join(f"{m.mention} ({m.status})" for m in members) or "No members."
-    embed = discord.Embed(title=f"Members in {target.name}", description=desc, color=target.color or discord.Color.blue(), timestamp=datetime.now(timezone.utc))
+    embed = discord.Embed(title=f"👥 Members in {target.name}", description=desc, color=target.color or discord.Color.blue(), timestamp=datetime.now(timezone.utc))
     if len(target.members) > 25:
         embed.add_field(name="More", value=f"+{len(target.members) - 25} more", inline=False)
+    embed.set_footer(text="Showing up to 25 members.")
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 async def userinfo_handler(interaction_or_ctx, member: Optional[discord.Member]):
     if not interaction_or_ctx.guild:
         return
     target = member or getattr(interaction_or_ctx, "user", interaction_or_ctx.author)
-    embed = discord.Embed(title=f"Profile: {target}", color=target.color or discord.Color.blue(), timestamp=datetime.now(timezone.utc))
+    embed = discord.Embed(title=f"👤 Profile: {target}", color=target.color or discord.Color.blue(), timestamp=datetime.now(timezone.utc))
     embed.set_thumbnail(url=target.display_avatar.url)
     embed.add_field(name="ID", value=target.id, inline=True)
     embed.add_field(name="Status", value=str(target.status).title(), inline=True)
     embed.add_field(name="Joined", value=target.joined_at.strftime("%Y-%m-%d") if target.joined_at else "N/A", inline=True)
     roles = [r.mention for r in target.roles if r != interaction_or_ctx.guild.default_role]
     embed.add_field(name="Roles", value=", ".join(roles) or "None", inline=False)
+    embed.set_footer(text="User info retrieved.")
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 async def serverinfo_handler(interaction_or_ctx):
     if not interaction_or_ctx.guild:
         return
     guild = interaction_or_ctx.guild
-    embed = discord.Embed(title=f"Server: {guild.name}", color=discord.Color.blue(), timestamp=datetime.now(timezone.utc))
+    embed = discord.Embed(title=f"🖥️ Server: {guild.name}", color=discord.Color.blue(), timestamp=datetime.now(timezone.utc))
     embed.set_thumbnail(url=guild.icon.url if guild.icon else None)
     embed.add_field(name="Members", value=guild.member_count, inline=True)
     embed.add_field(name="Text Channels", value=len(guild.text_channels), inline=True)
     embed.add_field(name="Voice Channels", value=len(guild.voice_channels), inline=True)
+    embed.set_footer(text="Server stats at a glance.")
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 async def avatar_handler(interaction_or_ctx, member: Optional[discord.Member]):
     target = member or getattr(interaction_or_ctx, "user", interaction_or_ctx.author)
-    embed = discord.Embed(title=f"{target}'s Avatar", color=discord.Color.blue(), timestamp=datetime.now(timezone.utc))
+    embed = discord.Embed(title=f"🖼️ {target}'s Avatar", color=discord.Color.blue(), timestamp=datetime.now(timezone.utc))
     embed.set_image(url=target.display_avatar.url)
+    embed.set_footer(text="Avatar displayed.")
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 async def banner_handler(interaction_or_ctx, member: Optional[discord.Member]):
     target = member or getattr(interaction_or_ctx, "user", interaction_or_ctx.author)
     user_obj = await bot.fetch_user(target.id)
     if user_obj.banner:
-        embed = discord.Embed(title=f"{user_obj}'s Banner", color=discord.Color.blue(), timestamp=datetime.now(timezone.utc))
+        embed = discord.Embed(title=f"📸 {user_obj}'s Banner", color=discord.Color.blue(), timestamp=datetime.now(timezone.utc))
         embed.set_image(url=user_obj.banner.url)
+        embed.set_footer(text="Banner displayed.")
         await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
     else:
-        await (interaction_or_ctx.response.send_message(f"{user_obj} has no banner.", ephemeral=True) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(f"{user_obj} has no banner.", delete_after=8))
+        embed = discord.Embed(title="📸 No Banner", description=f"{user_obj} has no banner set.", color=discord.Color.orange())
+        await (interaction_or_ctx.response.send_message(embed=embed, ephemeral=True) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed, delete_after=8))
 
 async def quote_handler(interaction_or_ctx, text: str, member: Optional[discord.Member]):
     user = getattr(interaction_or_ctx, "user", interaction_or_ctx.author)
@@ -884,7 +941,7 @@ async def quote_handler(interaction_or_ctx, text: str, member: Optional[discord.
         send_func = interaction_or_ctx.send
     avatar_bytes = await _download_image_bytes(str(target.display_avatar.url))
     if not avatar_bytes:
-        embed = discord.Embed(title="Error", description="Failed to download avatar.", color=discord.Color.red())
+        embed = discord.Embed(title="❌ Error", description="Failed to download avatar.", color=discord.Color.red())
         return await send_func(embed=embed)
     canvas = Image.new("RGB", (800, 400), (20, 20, 25))
     draw = ImageDraw.Draw(canvas)
@@ -901,8 +958,9 @@ async def quote_handler(interaction_or_ctx, text: str, member: Optional[discord.
     canvas.save(buffer, format="JPEG", quality=95)
     buffer.seek(0)
     file = discord.File(fp=buffer, filename="quote.jpg")
-    embed = discord.Embed(title="Quote", description=f"By {target.display_name}", color=discord.Color.blue())
+    embed = discord.Embed(title="💬 Quote", description=f"By {target.display_name}", color=discord.Color.blue())
     embed.set_image(url="attachment://quote.jpg")
+    embed.set_footer(text="Quote generated!")
     await send_func(embed=embed, file=file)
     buffer.close()
 
@@ -913,8 +971,9 @@ async def modstats_handler(interaction_or_ctx, user: Optional[discord.Member]):
     await load_mod_stats(guild_id)
     target = user or getattr(interaction_or_ctx, "user", interaction_or_ctx.author)
     mod_stats_user = mod_stats.get(guild_id, {}).get(target.id, {"commands": [], "warned": [], "kicked": [], "banned": [], "unbanned": [], "timed_out": [], "untimed_out": [], "jailed": [], "unjailed": []})
-    desc = "\n".join(f"{action.title()}: {len(timestamps)}" for action, timestamps in mod_stats_user.items())
-    embed = discord.Embed(title=f"{target}'s Mod Stats", description=desc or "No stats.", color=discord.Color.orange(), timestamp=datetime.now(timezone.utc))
+    desc = "\n".join(f"**{action.title()}**: {len(timestamps)}" for action, timestamps in mod_stats_user.items())
+    embed = discord.Embed(title=f"📊 {target}'s Mod Stats", description=desc or "No stats yet.", color=discord.Color.orange(), timestamp=datetime.now(timezone.utc))
+    embed.set_footer(text="Moderation stats overview.")
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 async def me_handler(interaction_or_ctx):
@@ -924,11 +983,12 @@ async def me_handler(interaction_or_ctx):
     guild_id = interaction_or_ctx.guild.id
     xp = get_user_xp(guild_id, user.id)
     level, xp_in_level, next_needed, progress = get_level_info(xp)
-    embed = discord.Embed(title=f"{user.display_name}'s Profile", color=discord.Color.blue(), timestamp=datetime.now(timezone.utc))
-    embed.add_field(name="Level", value=str(level), inline=True)
-    embed.add_field(name="XP", value=f"{xp_in_level}/{xp_in_level + next_needed}", inline=True)
-    embed.add_field(name="Progress", value=f"{progress_bar(progress)} {progress:.1f}%", inline=False)
+    embed = discord.Embed(title=f"📝 {user.display_name}'s Profile", color=discord.Color.blue(), timestamp=datetime.now(timezone.utc))
+    embed.add_field(name="Level", value=f"**{level}** 🎖️", inline=True)
+    embed.add_field(name="XP", value=f"**{xp_in_level} / {xp_in_level + next_needed}** 📊", inline=True)
+    embed.add_field(name="Progress", value=f"{progress_bar(progress)} **{progress:.1f}%** 🚀", inline=False)
     embed.set_thumbnail(url=user.display_avatar.url)
+    embed.set_footer(text="Your profile at a glance!")
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 # Add this near other bot.command definitions (around line 900 in main.py)
@@ -1014,13 +1074,13 @@ async def on_message(message: discord.Message):
     if message.author.id in afk_cache:
         info = afk_cache.pop(message.author.id)
         afk_time = datetime.now(timezone.utc) - datetime.fromisoformat(info['since'])
-        embed = discord.Embed(title="Welcome Back!", description=f"AFK for {str(afk_time).split('.')[0]}: {info['reason']}", color=discord.Color.green())
+        embed = discord.Embed(title="👋 Welcome Back!", description=f"You were AFK for {str(afk_time).split('.')[0]}: {info['reason']}", color=discord.Color.green())
         await message.channel.send(f"{message.author.mention}", embed=embed, delete_after=10)
         await save_afk()
     for user in message.mentions:
         if user.id in afk_cache:
             info = afk_cache[user.id]
-            embed = discord.Embed(title=f"{user.display_name} is AFK", description=f"{info['reason']} (since {datetime.fromisoformat(info['since']).strftime('%Y-%m-%d %H:%M')})", color=discord.Color.orange())
+            embed = discord.Embed(title=f"😴 {user.display_name} is AFK", description=f"Reason: {info['reason']}\nSince: {datetime.fromisoformat(info['since']).strftime('%Y-%m-%d %H:%M')}", color=discord.Color.orange())
             await message.channel.send(embed=embed, delete_after=8)
     if message.guild:
         now = datetime.now().timestamp()
@@ -1034,410 +1094,24 @@ async def on_message(message: discord.Message):
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandOnCooldown):
-        embed = discord.Embed(title="On Cooldown", description=f"Retry after {error.retry_after:.2f}s.", color=discord.Color.orange())
+        embed = discord.Embed(title="⏳ On Cooldown", description=f"Retry after {error.retry_after:.2f}s.", color=discord.Color.orange())
     elif isinstance(error, commands.MissingPermissions):
-        embed = discord.Embed(title="Access Denied", description="Insufficient permissions.", color=discord.Color.red())
+        embed = discord.Embed(title="❌ Access Denied", description="Insufficient permissions.", color=discord.Color.red())
     else:
-        embed = discord.Embed(title="Error", description="Something went wrong.", color=discord.Color.red())
+        embed = discord.Embed(title="❌ Error", description="Something went wrong.", color=discord.Color.red())
         logger.error(f"Command error: {error}")
     await ctx.send(embed=embed, delete_after=10)
 
 @tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.CommandOnCooldown):
-        embed = discord.Embed(title="On Cooldown", description=f"Retry after {error.retry_after:.2f}s.", color=discord.Color.orange())
+        embed = discord.Embed(title="⏳ On Cooldown", description=f"Retry after {error.retry_after:.2f}s.", color=discord.Color.orange())
     elif isinstance(error, app_commands.MissingPermissions):
-        embed = discord.Embed(title="Access Denied", description="Insufficient permissions.", color=discord.Color.red())
+        embed = discord.Embed(title="❌ Access Denied", description="Insufficient permissions.", color=discord.Color.red())
     else:
-        embed = discord.Embed(title="Error", description="Something went wrong.", color=discord.Color.red())
+        embed = discord.Embed(title="❌ Error", description="Something went wrong.", color=discord.Color.red())
         logger.error(f"Slash command error: {error}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# Slash commands
-@tree.command(name="ping", description="Check bot latency")
-@app_commands.checks.cooldown(1, 30.0, key=lambda i: i.guild_id)
-async def ping_slash(interaction: discord.Interaction):
-    await ping_handler(interaction)
-
-@tree.command(name="help", description="Show available commands")
-@app_commands.checks.cooldown(1, 30.0, key=lambda i: i.guild_id)
-async def help_slash(interaction: discord.Interaction):
-    await help_handler(interaction)
-
-@tree.command(name="afk", description="Set AFK status")
-@app_commands.describe(reason="Reason for being AFK")
-@app_commands.checks.cooldown(1, 30.0, key=lambda i: i.guild_id)
-async def afk_slash(interaction: discord.Interaction, reason: str = "AFK"):
-    await afk_handler(interaction, reason)
-
-@tree.command(name="kick", description="Kick a member")
-@app_commands.describe(member="Member to kick", reason="Reason")
-@app_commands.checks.cooldown(1, 60.0, key=lambda i: i.guild_id)
-async def kick_slash(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = None):
-    await kick_handler(interaction, member, reason)
-
-@tree.command(name="ban", description="Ban a member")
-@app_commands.describe(member="Member to ban", reason="Reason")
-@app_commands.checks.cooldown(1, 60.0, key=lambda i: i.guild_id)
-async def ban_slash(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = None):
-    await ban_handler(interaction, member, reason)
-
-@tree.command(name="unban", description="Unban a user")
-@app_commands.describe(user="User to unban", reason="Reason")
-@app_commands.checks.cooldown(1, 60.0, key=lambda i: i.guild_id)
-async def unban_slash(interaction: discord.Interaction, user: discord.User, reason: Optional[str] = None):
-    await unban_handler(interaction, user, reason)
-
-@tree.command(name="warn", description="Warn a member")
-@app_commands.describe(member="Member to warn", reason="Reason")
-@app_commands.checks.cooldown(1, 30.0, key=lambda i: i.guild_id)
-async def warn_slash(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = None):
-    await warn_handler(interaction, member, reason)
-
-@tree.command(name="timeout", description="Timeout a member")
-@app_commands.describe(member="Member to timeout", duration="Minutes", reason="Reason")
-@app_commands.checks.cooldown(1, 60.0, key=lambda i: i.guild_id)
-async def timeout_slash(interaction: discord.Interaction, member: discord.Member, duration: int, reason: Optional[str] = None):
-    await timeout_handler(interaction, member, duration, reason)
-
-@tree.command(name="untimeout", description="Remove timeout")
-@app_commands.describe(member="Member to untimeout", reason="Reason")
-@app_commands.checks.cooldown(1, 60.0, key=lambda i: i.guild_id)
-async def untimeout_slash(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = None):
-    await untimeout_handler(interaction, member, reason)
-
-@tree.command(name="jail", description="Jail a member")
-@app_commands.describe(member="Member to jail", reason="Reason")
-@app_commands.checks.cooldown(1, 60.0, key=lambda i: i.guild_id)
-async def jail_slash(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = None):
-    await jail_handler(interaction, member, reason)
-
-@tree.command(name="unjail", description="Unjail a member")
-@app_commands.describe(member="Member to unjail", reason="Reason")
-@app_commands.checks.cooldown(1, 60.0, key=lambda i: i.guild_id)
-async def unjail_slash(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = None):
-    await unjail_handler(interaction, member, reason)
-
-@tree.command(name="inrole", description="Show members in a role")
-@app_commands.describe(role="Role to check (default: your top role)")
-@app_commands.checks.cooldown(1, 30.0, key=lambda i: i.guild_id)
-async def inrole_slash(interaction: discord.Interaction, role: Optional[discord.Role] = None):
-    await inrole_handler(interaction, role)
-
-@tree.command(name="userinfo", description="Get user info")
-@app_commands.describe(member="User (default: you)")
-@app_commands.checks.cooldown(1, 30.0, key=lambda i: i.guild_id)
-async def userinfo_slash(interaction: discord.Interaction, member: Optional[discord.Member] = None):
-    await userinfo_handler(interaction, member)
-
-@tree.command(name="serverinfo", description="Get server info")
-@app_commands.checks.cooldown(1, 30.0, key=lambda i: i.guild_id)
-async def serverinfo_slash(interaction: discord.Interaction):
-    await serverinfo_handler(interaction)
-
-@tree.command(name="avatar", description="Get user avatar")
-@app_commands.describe(member="User (default: you)")
-@app_commands.checks.cooldown(1, 30.0, key=lambda i: i.guild_id)
-async def avatar_slash(interaction: discord.Interaction, member: Optional[discord.Member] = None):
-    await avatar_handler(interaction, member)
-
-@tree.command(name="banner", description="Get user banner")
-@app_commands.describe(member="User (default: you)")
-@app_commands.checks.cooldown(1, 30.0, key=lambda i: i.guild_id)
-async def banner_slash(interaction: discord.Interaction, member: Optional[discord.Member] = None):
-    await banner_handler(interaction, member)
-
-@tree.command(name="quote", description="Create a quote image")
-@app_commands.describe(text="Quote text", member="User to quote (default: you)")
-@app_commands.checks.cooldown(1, 60.0, key=lambda i: i.guild_id)
-async def quote_slash(interaction: discord.Interaction, text: str, member: Optional[discord.Member] = None):
-    await quote_handler(interaction, text, member)
-
-@tree.command(name="modstats", description="Check mod stats")
-@app_commands.describe(user="User (default: you)")
-@app_commands.checks.cooldown(1, 30.0, key=lambda i: i.guild_id)
-async def modstats_slash(interaction: discord.Interaction, user: Optional[discord.Member] = None):
-    await modstats_handler(interaction, user)
-
-@tree.command(name="setprefix", description="Change bot prefix")
-@app_commands.describe(new_prefix="New prefix (1-10 chars)")
-@app_commands.checks.cooldown(1, 60.0, key=lambda i: i.guild_id)
-async def setprefix_slash(interaction: discord.Interaction, new_prefix: str):
-    await setprefix_handler(interaction, new_prefix)
-
-@tree.command(name="getprefix", description="Show current prefix")
-@app_commands.checks.cooldown(1, 30.0, key=lambda i: i.guild_id)
-async def getprefix_slash(interaction: discord.Interaction):
-    await getprefix_handler(interaction)
-
-@tree.command(name="purge", description="Delete messages")
-@app_commands.describe(amount="Messages to delete (1-100)")
-@app_commands.checks.cooldown(1, 60.0, key=lambda i: i.guild_id)
-async def purge_slash(interaction: discord.Interaction, amount: int):
-    await purge_handler(interaction, amount)
-
-@tree.command(name="lock", description="Lock current channel")
-@app_commands.checks.cooldown(1, 60.0, key=lambda i: i.guild_id)
-async def lock_slash(interaction: discord.Interaction):
-    await lock_handler(interaction)
-
-@tree.command(name="unlock", description="Unlock current channel")
-@app_commands.checks.cooldown(1, 60.0, key=lambda i: i.guild_id)
-async def unlock_slash(interaction: discord.Interaction):
-    await unlock_handler(interaction)
-
-@tree.command(name="rank", description="Show level and XP")
-@app_commands.describe(user="User (default: you)")
-@app_commands.checks.cooldown(1, 30.0, key=lambda i: i.guild_id)
-async def rank_slash(interaction: discord.Interaction, user: Optional[discord.Member] = None):
-    await rank_handler(interaction, user)
-
-@tree.command(name="leaderboard", description="Show top XP users")
-@app_commands.checks.cooldown(1, 60.0, key=lambda i: i.guild_id)
-async def leaderboard_slash(interaction: discord.Interaction):
-    await leaderboard_handler(interaction)
-
-@tree.command(name="xp_add", description="Add XP (admin only)")
-@app_commands.describe(user="User", amount="XP amount")
-@app_commands.checks.cooldown(1, 60.0, key=lambda i: i.guild_id)
-async def xp_add_slash(interaction: discord.Interaction, user: discord.Member, amount: app_commands.Range[int, 1, None]):
-    await xp_add_handler(interaction, user, amount)
-
-@tree.command(name="xp_remove", description="Remove XP (admin only)")
-@app_commands.describe(user="User", amount="XP amount")
-@app_commands.checks.cooldown(1, 60.0, key=lambda i: i.guild_id)
-async def xp_remove_slash(interaction: discord.Interaction, user: discord.Member, amount: app_commands.Range[int, 1, None]):
-    await xp_remove_handler(interaction, user, amount)
-
-@tree.command(name="level_set", description="Set user level (admin only)")
-@app_commands.describe(user="User", level="Level")
-@app_commands.checks.cooldown(1, 60.0, key=lambda i: i.guild_id)
-async def level_set_slash(interaction: discord.Interaction, user: discord.Member, level: app_commands.Range[int, 0, None]):
-    await level_set_handler(interaction, user, level)
-
-@tree.command(name="rewards", description="Show level rewards")
-@app_commands.checks.cooldown(1, 30.0, key=lambda i: i.guild_id)
-async def rewards_slash(interaction: discord.Interaction):
-    await rewards_handler(interaction)
-
-@tree.command(name="levelchannelset", description="Set level notification channel (admin only)")
-@app_commands.describe(channel="Channel")
-@app_commands.checks.cooldown(1, 60.0, key=lambda i: i.guild_id)
-async def levelchannelset_slash(interaction: discord.Interaction, channel: discord.TextChannel):
-    await levelchannelset_handler(interaction, channel)
-
-@tree.command(name="meme", description="Fetch a random meme")
-@app_commands.describe(keywords="Optional keywords")
-@app_commands.checks.cooldown(1, 30.0, key=lambda i: i.guild_id)
-async def meme_slash(interaction: discord.Interaction, keywords: Optional[str] = None):
-    await meme_handler(interaction, keywords)
-
-@tree.command(name="coinflip", description="Flip a coin")
-@app_commands.checks.cooldown(1, 30.0, key=lambda i: i.guild_id)
-async def coinflip_slash(interaction: discord.Interaction):
-    await coinflip_handler(interaction)
-
-@tree.command(name="dice", description="Roll a die")
-@app_commands.checks.cooldown(1, 30.0, key=lambda i: i.guild_id)
-async def dice_slash(interaction: discord.Interaction):
-    await dice_handler(interaction)
-
-@tree.command(name="showlm", description="Show nth deleted photo (1=most recent)")
-@app_commands.describe(number="Index (default 1)")
-@app_commands.checks.cooldown(1, 30.0, key=lambda i: i.guild_id)
-async def showlm_slash(interaction: discord.Interaction, number: int = 1):
-    await showlm_handler(interaction, number)
-
-@tree.command(name="me", description="View your profile")
-@app_commands.checks.cooldown(1, 30.0, key=lambda i: i.guild_id)
-async def me_slash(interaction: discord.Interaction):
-    await me_handler(interaction)
-
-# Prefix commands
-@bot.command(name="ping")
-@commands.cooldown(1, 30.0, commands.BucketType.guild)
-async def ping_prefix(ctx):
-    await ping_handler(ctx)
-
-@bot.command(name="help")
-@commands.cooldown(1, 30.0, commands.BucketType.guild)
-async def help_prefix(ctx):
-    await help_handler(ctx)
-
-@bot.command(name="afk")
-@commands.cooldown(1, 30.0, commands.BucketType.guild)
-async def afk_prefix(ctx, *, reason: str = "AFK"):
-    await afk_handler(ctx, reason)
-
-@bot.command(name="kick")
-@commands.cooldown(1, 60.0, commands.BucketType.guild)
-async def kick_prefix(ctx, member: discord.Member, *, reason: Optional[str] = None):
-    await kick_handler(ctx, member, reason)
-
-@bot.command(name="ban")
-@commands.cooldown(1, 60.0, commands.BucketType.guild)
-async def ban_prefix(ctx, member: discord.Member, *, reason: Optional[str] = None):
-    await ban_handler(ctx, member, reason)
-
-@bot.command(name="unban")
-@commands.cooldown(1, 60.0, commands.BucketType.guild)
-async def unban_prefix(ctx, user: discord.User, *, reason: Optional[str] = None):
-    await unban_handler(ctx, user, reason)
-
-@bot.command(name="warn")
-@commands.cooldown(1, 30.0, commands.BucketType.guild)
-async def warn_prefix(ctx, member: discord.Member, *, reason: Optional[str] = None):
-    await warn_handler(ctx, member, reason)
-
-@bot.command(name="timeout")
-@commands.cooldown(1, 60.0, commands.BucketType.guild)
-async def timeout_prefix(ctx, member: discord.Member, duration: int, *, reason: Optional[str] = None):
-    await timeout_handler(ctx, member, duration, reason)
-
-@bot.command(name="untimeout")
-@commands.cooldown(1, 60.0, commands.BucketType.guild)
-async def untimeout_prefix(ctx, member: discord.Member, *, reason: Optional[str] = None):
-    await untimeout_handler(ctx, member, reason)
-
-@bot.command(name="jail")
-@commands.cooldown(1, 60.0, commands.BucketType.guild)
-async def jail_prefix(ctx, member: discord.Member, *, reason: Optional[str] = None):
-    await jail_handler(ctx, member, reason)
-
-@bot.command(name="unjail")
-@commands.cooldown(1, 60.0, commands.BucketType.guild)
-async def unjail_prefix(ctx, member: discord.Member, *, reason: Optional[str] = None):
-    await unjail_handler(ctx, member, reason)
-
-@bot.command(name="inrole")
-@commands.cooldown(1, 30.0, commands.BucketType.guild)
-async def inrole_prefix(ctx, role: Optional[discord.Role] = None):
-    await inrole_handler(ctx, role)
-
-@bot.command(name="userinfo")
-@commands.cooldown(1, 30.0, commands.BucketType.guild)
-async def userinfo_prefix(ctx, member: Optional[discord.Member] = None):
-    await userinfo_handler(ctx, member)
-
-@bot.command(name="serverinfo")
-@commands.cooldown(1, 30.0, commands.BucketType.guild)
-async def serverinfo_prefix(ctx):
-    await serverinfo_handler(ctx)
-
-@bot.command(name="avatar")
-@commands.cooldown(1, 30.0, commands.BucketType.guild)
-async def avatar_prefix(ctx, member: Optional[discord.Member] = None):
-    await avatar_handler(ctx, member)
-
-@bot.command(name="banner")
-@commands.cooldown(1, 30.0, commands.BucketType.guild)
-async def banner_prefix(ctx, member: Optional[discord.Member] = None):
-    await banner_handler(ctx, member)
-
-@bot.command(name="quote")
-@commands.cooldown(1, 60.0, commands.BucketType.guild)
-async def quote_prefix(ctx, *, args: str):
-    member = ctx.message.mentions[0] if ctx.message.mentions else None
-    text = args.replace(f"<@{member.id}>" if member else "", "").strip()
-    await quote_handler(ctx, text, member)
-
-@bot.command(name="modstats")
-@commands.cooldown(1, 30.0, commands.BucketType.guild)
-async def modstats_prefix(ctx, user: Optional[discord.Member] = None):
-    await modstats_handler(ctx, user)
-
-@bot.command(name="setprefix")
-@commands.has_permissions(manage_guild=True)
-@commands.cooldown(1, 60.0, commands.BucketType.guild)
-async def setprefix_prefix(ctx, new_prefix: str):
-    await setprefix_handler(ctx, new_prefix)
-
-@bot.command(name="getprefix")
-@commands.cooldown(1, 30.0, commands.BucketType.guild)
-async def getprefix_prefix(ctx):
-    await getprefix_handler(ctx)
-
-@bot.command(name="purge")
-@commands.has_permissions(manage_messages=True)
-@commands.cooldown(1, 60.0, commands.BucketType.guild)
-async def purge_prefix(ctx, amount: int):
-    await purge_handler(ctx, amount)
-
-@bot.command(name="lock")
-@commands.has_permissions(manage_channels=True)
-@commands.cooldown(1, 60.0, commands.BucketType.guild)
-async def lock_prefix(ctx):
-    await lock_handler(ctx)
-
-@bot.command(name="unlock")
-@commands.has_permissions(manage_channels=True)
-@commands.cooldown(1, 60.0, commands.BucketType.guild)
-async def unlock_prefix(ctx):
-    await unlock_handler(ctx)
-
-@bot.command(name="rank")
-@commands.cooldown(1, 30.0, commands.BucketType.guild)
-async def rank_prefix(ctx, member: Optional[discord.Member] = None):
-    await rank_handler(ctx, member)
-
-@bot.command(name="leaderboard")
-@commands.cooldown(1, 60.0, commands.BucketType.guild)
-async def leaderboard_prefix(ctx):
-    await leaderboard_handler(ctx)
-
-@bot.command(name="xpadd")
-@commands.has_permissions(manage_guild=True)
-@commands.cooldown(1, 60.0, commands.BucketType.guild)
-async def xpadd_prefix(ctx, member: discord.Member, amount: int):
-    await xp_add_handler(ctx, member, amount)
-
-@bot.command(name="xpremove")
-@commands.has_permissions(manage_guild=True)
-@commands.cooldown(1, 60.0, commands.BucketType.guild)
-async def xpremove_prefix(ctx, member: discord.Member, amount: int):
-    await xp_remove_handler(ctx, member, amount)
-
-@bot.command(name="levelset")
-@commands.has_permissions(manage_guild=True)
-@commands.cooldown(1, 60.0, commands.BucketType.guild)
-async def levelset_prefix(ctx, member: discord.Member, level: int):
-    await level_set_handler(ctx, member, level)
-
-@bot.command(name="rewards")
-@commands.cooldown(1, 30.0, commands.BucketType.guild)
-async def rewards_prefix(ctx):
-    await rewards_handler(ctx)
-
-@bot.command(name="levelchannelset")
-@commands.has_permissions(manage_guild=True)
-@commands.cooldown(1, 60.0, commands.BucketType.guild)
-async def levelchannelset_prefix(ctx, channel: discord.TextChannel):
-    await levelchannelset_handler(ctx, channel)
-
-@bot.command(name="meme")
-@commands.cooldown(1, 30.0, commands.BucketType.guild)
-async def meme_prefix(ctx, *, keywords: Optional[str] = None):
-    await meme_handler(ctx, keywords)
-
-@bot.command(name="coinflip")
-@commands.cooldown(1, 30.0, commands.BucketType.guild)
-async def coinflip_prefix(ctx):
-    await coinflip_handler(ctx)
-
-@bot.command(name="dice")
-@commands.cooldown(1, 30.0, commands.BucketType.guild)
-async def dice_prefix(ctx):
-    await dice_handler(ctx)
-
-@bot.command(name="showlm")
-@commands.cooldown(1, 30.0, commands.BucketType.guild)
-async def showlm_prefix(ctx, number: int = 1):
-    await showlm_handler(ctx, number)
-
-@bot.command(name="me")
-@commands.cooldown(1, 30.0, commands.BucketType.guild)
-async def me_prefix(ctx):
-    await me_handler(ctx)
 
 # Run bot
 if __name__ == "__main__":
