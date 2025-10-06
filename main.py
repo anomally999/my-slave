@@ -931,6 +931,24 @@ async def me_handler(interaction_or_ctx):
     embed.set_thumbnail(url=user.display_avatar.url)
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
+# Add this near other bot.command definitions (around line 900 in main.py)
+@bot.command(name="sync")
+@commands.has_permissions(administrator=True)
+async def sync_prefix(ctx):
+    try:
+        bot.tree.clear_commands(guild=None)
+        if GUILD_ID:
+            guild = discord.Object(id=GUILD_ID)
+            bot.tree.copy_global_to(guild=guild)
+            await bot.tree.sync(guild=guild)
+            logger.info(f"Synced commands for guild {GUILD_ID}")
+        await bot.tree.sync()
+        logger.info("Synced global slash commands")
+        await ctx.send("Slash commands synced!", delete_after=10)
+    except Exception as e:
+        logger.error(f"Sync failed: {e}")
+        await ctx.send(f"Sync failed: {e}", delete_after=10)
+        
 # Events
 @bot.event
 async def on_ready():
