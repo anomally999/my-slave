@@ -1,4 +1,4 @@
-git init
-git add .
-git commit -m "Updated MEE6-like bot with Mint design"
 .env
+bot_data.db
+__pycache__/
+*.pyc
