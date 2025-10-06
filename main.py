@@ -1,4 +1,4 @@
-from flask import Flask
+import asyncio
 import threading
 import os
 import discord
@@ -10,14 +10,15 @@ import logging
 from dotenv import load_dotenv
 from datetime import datetime, timezone, timedelta
 import aiohttp
+import aiofiles
 from io import BytesIO
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont
 from typing import Optional
-import asyncio
 import tempfile
 import shutil
+from flask import Flask
 
-# Flask setup for Render Web Service
+# Flask setup for health check
 app = Flask(__name__)
 
 @app.route('/')
@@ -26,120 +27,120 @@ def health():
     return 'Bot is alive! 🌿', 200
 
 def run_flask():
-    port = int(os.environ.get('PORT', 8080))  # Render sets PORT
+    port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port, debug=False)
 
 # Start Flask in a background thread
 flask_thread = threading.Thread(target=run_flask, daemon=True)
 flask_thread.start()
 
-# ---------- LOGGING SETUP ----------
+# Logging setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# ---------- ENV ----------
+# Environment variables
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = int(os.getenv("GUILD_ID", 0)) or None
+GUILD_ID = os.getenv("GUILD_ID")
+if GUILD_ID:
+    GUILD_ID = int(GUILD_ID)
+else:
+    GUILD_ID = None
+DEFAULT_PREFIX = os.getenv("PREFIX", "!")
 SETTINGS_FILE = "settings.json"
 MOD_STATS_DIR = "mod_stats"
 XP_DIR = "xp_data"
 LAST_SEEN_FILE = "last_seen.json"
 LAST_DELETED_PHOTO_DIR = "last_deleted_photo"
 AFK_FILE = "afk.json"
-prefixes: dict[int, str] = {}
-level_channels: dict[int, Optional[int]] = {}
-DEFAULT_PREFIX = os.getenv("PREFIX", "!")
 
 if not TOKEN:
     logger.error("DISCORD_TOKEN is not set in .env file")
     raise ValueError("DISCORD_TOKEN is required")
 
+# Create directories
 for directory in [MOD_STATS_DIR, XP_DIR, LAST_DELETED_PHOTO_DIR]:
     os.makedirs(directory, exist_ok=True)
 
-def load_json(file_path: str, default=None):
+# Data structures
+prefixes: dict[int, str] = {}
+level_channels: dict[int, Optional[int]] = {}
+xp_data: dict[int, dict[int, int]] = {}
+mod_stats: dict[int, dict[int, dict[str, list]]] = {}
+last_seen: dict[int, str] = {}
+last_deleted_photo: dict[int, list[dict]] = {}
+afk_cache: dict[int, dict] = {}
+msg_cooldown: dict[int, dict[int, float]] = {}
+
+# File operations
+async def load_json(file_path: str, default=None):
     try:
-        if os.path.exists(file_path):
-            with open(file_path, "r") as f:
-                return json.load(f)
-        return default
+        async with aiofiles.open(file_path, "r", encoding='utf-8') as f:
+            return json.loads(await f.read())
     except Exception as e:
         logger.error(f"Failed to load {file_path}: {e}")
         return default
 
-def save_json(file_path: str, data, dir_path: Optional[str] = None):
+async def save_json(file_path: str, data, dir_path: Optional[str] = None):
     try:
         temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8', dir=dir_path)
         json.dump(data, temp_file, indent=2)
         temp_file.close()
-        shutil.move(temp_file.name, file_path)
+        async with aiofiles.open(temp_file.name, "r", encoding='utf-8') as f:
+            content = await f.read()
+        async with aiofiles.open(file_path, "w", encoding='utf-8') as f:
+            await f.write(content)
+        os.unlink(temp_file.name)
     except Exception as e:
         logger.error(f"Failed to save to {file_path}: {e}")
 
-def load_settings():
-    data = load_json(SETTINGS_FILE, {})
+# Settings management
+async def load_settings():
+    data = await load_json(SETTINGS_FILE, {})
     for str_g, s in data.items():
         gid = int(str_g)
         prefixes[gid] = s.get("prefix", DEFAULT_PREFIX)
         level_channels[gid] = s.get("level_channel", None)
 
-def save_settings():
+async def save_settings():
     all_guilds = set(prefixes.keys()) | set(level_channels.keys())
     data = {str(k): {"prefix": prefixes.get(k, DEFAULT_PREFIX), "level_channel": level_channels.get(k, None)} for k in all_guilds}
-    save_json(SETTINGS_FILE, data)
+    await save_json(SETTINGS_FILE, data)
 
-load_settings()
-
-def get_prefix(bot_, message: discord.Message):
-    if not message.guild:
-        return commands.when_mentioned_or(DEFAULT_PREFIX)(bot_, message)
-    prefix = prefixes.get(message.guild.id, DEFAULT_PREFIX)
-    return commands.when_mentioned_or(prefix)(bot_, message)
-
-def get_level_channel(guild_id: int) -> Optional[int]:
-    return level_channels.get(guild_id, None)
-
-def set_level_channel(guild_id: int, channel_id: Optional[int]):
-    level_channels[guild_id] = channel_id
-    save_settings()
-
-# ---------- XP DATA HANDLING ----------
-xp_data: dict[int, dict[int, int]] = {}
-
-def load_xp(guild_id: int):
+# XP handling
+async def load_xp(guild_id: int):
     if guild_id in xp_data:
         return
     filename = os.path.join(XP_DIR, f"guild_{guild_id}.json")
-    data = load_json(filename, {})
+    data = await load_json(filename, {})
     xp_data[guild_id] = {int(k): int(v) for k, v in data.items()}
 
-def save_xp(guild_id: int):
+async def save_xp(guild_id: int):
     if guild_id not in xp_data:
         return
     filename = os.path.join(XP_DIR, f"guild_{guild_id}.json")
     data = {str(k): v for k, v in xp_data[guild_id].items()}
-    save_json(filename, data, XP_DIR)
+    await save_json(filename, data, XP_DIR)
 
 def get_user_xp(guild_id: int, user_id: int) -> int:
     if guild_id not in xp_data:
-        load_xp(guild_id)
-    return xp_data[guild_id].get(user_id, 0)
+        asyncio.create_task(load_xp(guild_id))
+    return xp_data.get(guild_id, {}).get(user_id, 0)
 
 def set_user_xp(guild_id: int, user_id: int, xp: int):
     if guild_id not in xp_data:
-        load_xp(guild_id)
-    xp_data[guild_id][user_id] = max(0, xp)
-    save_xp(guild_id)
+        asyncio.create_task(load_xp(guild_id))
+    xp_data.setdefault(guild_id, {})[user_id] = max(0, xp)
+    asyncio.create_task(save_xp(guild_id))
 
-def add_user_xp(guild_id: int, user_id: int, amount: int):
+async def add_user_xp(guild_id: int, user_id: int, amount: int):
     current = get_user_xp(guild_id, user_id)
     old_level = get_level(current)
     new_xp = current + amount
     set_user_xp(guild_id, user_id, new_xp)
     new_level = get_level(new_xp)
     if new_level > old_level:
-        asyncio.create_task(notify_level_up(guild_id, user_id, new_level))
+        await notify_level_up(guild_id, user_id, new_level)
 
 def get_level(xp: int) -> int:
     if xp <= 0:
@@ -171,7 +172,7 @@ async def notify_level_up(guild_id: int, user_id: int, new_level: int):
     member = guild.get_member(user_id)
     if not member:
         return
-    channel_id = get_level_channel(guild_id)
+    channel_id = level_channels.get(guild_id)
     if not channel_id:
         return
     channel = guild.get_channel(channel_id)
@@ -182,8 +183,8 @@ async def notify_level_up(guild_id: int, user_id: int, new_level: int):
         role_name = level_rewards[new_level]
         role = discord.utils.get(guild.roles, name=role_name)
         if not role:
-            role = await guild.create_role(name=role_name, colour=discord.Color.random())
-        await member.add_roles(role)
+            role = await guild.create_role(name=role_name, colour=discord.Color.random(), reason="Level reward")
+        await member.add_roles(role, reason=f"Reached level {new_level}")
         reward_msg = f"\nUnlocked **{role_name}** role!"
     embed = discord.Embed(
         title="Level Up!",
@@ -194,30 +195,19 @@ async def notify_level_up(guild_id: int, user_id: int, new_level: int):
     embed.set_thumbnail(url=member.display_avatar.url)
     await channel.send(embed=embed)
 
-# ---------- INTENTS ----------
-intents = discord.Intents.default()
-intents.members = True
-intents.message_content = True
-intents.guilds = True
-
-bot = commands.Bot(command_prefix=get_prefix, intents=intents, help_command=None)
-tree = bot.tree
-
-# ---------- MOD STATS HANDLING ----------
-mod_stats: dict[int, dict[int, dict[str, list]]] = {}
-
-def load_mod_stats(guild_id: int):
+# Mod stats handling
+async def load_mod_stats(guild_id: int):
     filename = os.path.join(MOD_STATS_DIR, f"guild_{guild_id}.json")
-    data = load_json(filename, {})
+    data = await load_json(filename, {})
     mod_stats[guild_id] = {
         int(user_id): {action: stats.get(action, []) for action in ["commands", "warned", "kicked", "banned", "unbanned", "timed_out", "untimed_out", "jailed", "unjailed"]}
         for user_id, stats in data.items()
     }
 
-def save_mod_stats(guild_id: int):
+async def save_mod_stats(guild_id: int):
     filename = os.path.join(MOD_STATS_DIR, f"guild_{guild_id}.json")
     data = {str(k): v for k, v in mod_stats.get(guild_id, {}).items()}
-    save_json(filename, data, MOD_STATS_DIR)
+    await save_json(filename, data, MOD_STATS_DIR)
 
 def update_mod_stats(guild_id: int, user_id: int, action: str):
     mod_stats_guild = mod_stats.setdefault(guild_id, {})
@@ -225,52 +215,45 @@ def update_mod_stats(guild_id: int, user_id: int, action: str):
         "commands": [], "warned": [], "kicked": [], "banned": [], "unbanned": [], "timed_out": [], "untimed_out": [], "jailed": [], "unjailed": []
     })
     mod_stats_user[action].append(datetime.now(timezone.utc).isoformat())
-    save_mod_stats(guild_id)
+    asyncio.create_task(save_mod_stats(guild_id))
 
-def count_actions(timestamps: list, days: Optional[int] = None) -> int:
-    if days is None:
-        return len(timestamps)
-    threshold = datetime.now(timezone.utc) - timedelta(days=days)
-    return sum(1 for ts in timestamps if datetime.fromisoformat(ts) > threshold)
+# Last seen handling
+async def load_last_seen():
+    last_seen.update({int(k): v for k, v in (await load_json(LAST_SEEN_FILE, {})).items()})
 
-# ---------- LAST SEEN HANDLING ----------
-last_seen: dict[int, str] = {}
+async def save_last_seen():
+    await save_json(LAST_SEEN_FILE, {str(k): v for k, v in last_seen.items()})
 
-def load_last_seen():
-    last_seen.update({int(k): v for k, v in load_json(LAST_SEEN_FILE, {}).items()})
-
-def save_last_seen():
-    save_json(LAST_SEEN_FILE, {str(k): v for k, v in last_seen.items()})
-
-load_last_seen()
-
-# ---------- LAST DELETED PHOTO HANDLING ----------
-last_deleted_photo: dict[int, list[dict]] = {}
-
-def load_last_deleted_photo(guild_id: int):
+# Last deleted photo handling
+async def load_last_deleted_photo(guild_id: int):
     filename = os.path.join(LAST_DELETED_PHOTO_DIR, f"guild_{guild_id}.json")
-    data = load_json(filename, [])
+    data = await load_json(filename, [])
     last_deleted_photo[guild_id] = data if isinstance(data, list) else []
 
-def save_last_deleted_photo(guild_id: int):
+async def save_last_deleted_photo(guild_id: int):
     if guild_id not in last_deleted_photo:
         return
     filename = os.path.join(LAST_DELETED_PHOTO_DIR, f"guild_{guild_id}.json")
-    save_json(filename, last_deleted_photo[guild_id], LAST_DELETED_PHOTO_DIR)
+    await save_json(filename, last_deleted_photo[guild_id], LAST_DELETED_PHOTO_DIR)
 
-# ---------- AFK HANDLING ----------
-afk_cache: dict[int, dict] = {}
-
-def load_afk():
+# AFK handling
+async def load_afk():
     global afk_cache
-    afk_cache = {int(k): v for k, v in load_json(AFK_FILE, {}).items()}
+    afk_cache = {int(k): v for k, v in (await load_json(AFK_FILE, {})).items()}
 
-def save_afk():
-    save_json(AFK_FILE, {str(k): v for k, v in afk_cache.items()})
+async def save_afk():
+    await save_json(AFK_FILE, {str(k): v for k, v in afk_cache.items()})
 
-load_afk()
+# Bot setup
+intents = discord.Intents.default()
+intents.members = True
+intents.message_content = True
+intents.guilds = True
 
-# ---------- HELPERS ----------
+bot = commands.Bot(command_prefix=lambda bot_, msg: commands.when_mentioned_or(prefixes.get(msg.guild.id, DEFAULT_PREFIX) if msg.guild else DEFAULT_PREFIX)(bot_, msg), intents=intents, help_command=None)
+tree = bot.tree
+
+# Helpers
 async def has_permission(interaction_or_ctx, perm: str) -> bool:
     user = getattr(interaction_or_ctx, "user", interaction_or_ctx.author)
     if getattr(user.guild_permissions, perm, False):
@@ -280,14 +263,14 @@ async def has_permission(interaction_or_ctx, perm: str) -> bool:
     return False
 
 async def _download_image_bytes(url: str) -> Optional[bytes]:
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(url) as r:
-                if r.status == 200:
-                    return await r.read()
-    except Exception as e:
-        logger.error(f"Failed to download image from {url}: {e}")
-        return None
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    return await response.read()
+        except Exception as e:
+            logger.error(f"Failed to download image from {url}: {e}")
+            return None
 
 def _wrap_text(text: str, font: ImageFont.FreeTypeFont, max_w: int) -> list[str]:
     dummy = ImageDraw.Draw(Image.new("RGB", (1, 1)))
@@ -321,19 +304,22 @@ async def send_dm(member: discord.Member, action: str, mod: discord.Member, reas
         embed.set_footer(text=f"Guild: {member.guild.name}")
         await member.send(embed=embed)
     except discord.Forbidden:
-        pass
+        logger.warning(f"Failed to send DM to {member.id} for {action}")
 
 async def mod_action_embed(target: discord.abc.User, action: str, reason: Optional[str], mod: discord.Member):
-    embed = discord.Embed(title=f"{action.capitalize()} Executed", color=discord.Color.red() if action in {"kick", "ban"} else discord.Color.orange(), timestamp=datetime.now(timezone.utc))
+    embed = discord.Embed(
+        title=f"{action.capitalize()} Executed",
+        color=discord.Color.red() if action in {"kick", "ban"} else discord.Color.orange(),
+        timestamp=datetime.now(timezone.utc)
+    )
     embed.add_field(name="Member", value=f"{target} ({target.id})", inline=False)
     embed.add_field(name="Moderator", value=f"{mod} ({mod.id})", inline=False)
     embed.add_field(name="Reason", value=reason or "No reason provided", inline=False)
     embed.set_thumbnail(url=target.display_avatar.url if hasattr(target, 'display_avatar') else None)
     return embed
 
-# ---------- COMMAND HANDLERS ----------
+# Command handlers
 async def setprefix_handler(interaction_or_ctx, new_prefix: str):
-    user = getattr(interaction_or_ctx, "user", interaction_or_ctx.author)
     guild = interaction_or_ctx.guild
     if not guild:
         return await interaction_or_ctx.response.send_message("This command requires a server.", ephemeral=True)
@@ -342,12 +328,11 @@ async def setprefix_handler(interaction_or_ctx, new_prefix: str):
     if len(new_prefix) > 10:
         return await interaction_or_ctx.response.send_message("Prefix must be ≤10 characters.", ephemeral=True)
     prefixes[guild.id] = new_prefix
-    save_settings()
+    await save_settings()
     embed = discord.Embed(title="Prefix Updated", description=f"New prefix: `{new_prefix}`", color=discord.Color.green())
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
 async def getprefix_handler(interaction_or_ctx):
-    user = getattr(interaction_or_ctx, "user", interaction_or_ctx.author)
     guild = interaction_or_ctx.guild
     prefix = DEFAULT_PREFIX if not guild else prefixes.get(guild.id, DEFAULT_PREFIX)
     embed = discord.Embed(title="Current Prefix", description=f"Prefix: `{prefix}`\nSlash commands: `/`", color=discord.Color.blue())
@@ -433,7 +418,7 @@ async def leaderboard_handler(interaction_or_ctx):
     if not interaction_or_ctx.guild:
         return
     guild_id = interaction_or_ctx.guild.id
-    load_xp(guild_id)
+    await load_xp(guild_id)
     user_xps = [(interaction_or_ctx.guild.get_member(uid), x) for uid, x in xp_data[guild_id].items() if interaction_or_ctx.guild.get_member(uid)]
     sorted_users = sorted(user_xps, key=lambda x: x[1], reverse=True)[:10]
     if not sorted_users:
@@ -451,7 +436,7 @@ async def xp_add_handler(interaction_or_ctx, member: discord.Member, amount: int
     if amount < 1:
         return await interaction_or_ctx.response.send_message("Amount must be positive.", ephemeral=True)
     guild_id = interaction_or_ctx.guild.id
-    add_user_xp(guild_id, member.id, amount)
+    await add_user_xp(guild_id, member.id, amount)
     xp = get_user_xp(guild_id, member.id)
     level, _, next_needed, _ = get_level_info(xp)
     embed = discord.Embed(title="XP Added", description=f"Added {amount} XP to {member.mention}. Total: {xp} XP (Lv. {level})", color=discord.Color.green())
@@ -497,7 +482,8 @@ async def levelchannelset_handler(interaction_or_ctx, channel: discord.TextChann
         return
     if not await has_permission(interaction_or_ctx, "manage_guild"):
         return
-    set_level_channel(interaction_or_ctx.guild.id, channel.id)
+    level_channels[interaction_or_ctx.guild.id] = channel.id
+    await save_settings()
     embed = discord.Embed(title="Level Channel Set", description=f"Level notifications set to {channel.mention}.", color=discord.Color.green())
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
@@ -509,8 +495,15 @@ async def meme_handler(interaction_or_ctx, keywords: Optional[str] = None):
         send_func = interaction_or_ctx.send
     url = f"https://meme-api.com/gimme/{keywords.replace(' ', '')}" if keywords else "https://meme-api.com/gimme"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            data = await resp.json()
+        try:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    raise ValueError(f"API returned {resp.status}")
+                data = await resp.json()
+        except Exception as e:
+            logger.error(f"Failed to fetch meme: {e}")
+            embed = discord.Embed(title="Error", description="Failed to fetch meme.", color=discord.Color.red())
+            return await send_func(embed=embed)
     embed = discord.Embed(title=data["title"], color=discord.Color.orange(), timestamp=datetime.now(timezone.utc))
     if data["url"].endswith(('.jpg', '.png', '.gif', '.webp')):
         embed.set_image(url=data["url"])
@@ -532,7 +525,7 @@ async def showlm_handler(interaction_or_ctx, number: int = 1):
     if not interaction_or_ctx.guild:
         return
     guild_id = interaction_or_ctx.guild.id
-    load_last_deleted_photo(guild_id)
+    await load_last_deleted_photo(guild_id)
     photos = last_deleted_photo.get(guild_id, [])
     if not photos or number < 1 or number > len(photos):
         msg = f"Invalid number. Available: 1 to {len(photos)}" if photos else "No deleted photos."
@@ -546,7 +539,7 @@ async def showlm_handler(interaction_or_ctx, number: int = 1):
 async def afk_handler(interaction_or_ctx, reason: str = "AFK"):
     user = getattr(interaction_or_ctx, "user", interaction_or_ctx.author)
     afk_cache[user.id] = {"reason": reason, "since": datetime.now(timezone.utc).isoformat()}
-    save_afk()
+    await save_afk()
     embed = discord.Embed(title="AFK Set", description=f"Reason: {reason}", color=discord.Color.blue())
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
@@ -557,12 +550,16 @@ async def kick_handler(interaction_or_ctx, member: discord.Member, reason: Optio
     if not await has_permission(interaction_or_ctx, "kick_members"):
         return
     guild_id = interaction_or_ctx.guild.id
-    load_mod_stats(guild_id)
-    await member.kick(reason=reason)
-    update_mod_stats(guild_id, user.id, "kicked")
-    await send_dm(member, "kicked", user, reason)
-    embed = await mod_action_embed(member, "kick", reason, user)
-    await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
+    await load_mod_stats(guild_id)
+    try:
+        await member.kick(reason=reason)
+        update_mod_stats(guild_id, user.id, "kicked")
+        await send_dm(member, "kicked", user, reason)
+        embed = await mod_action_embed(member, "kick", reason, user)
+        await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
+    except discord.Forbidden:
+        embed = discord.Embed(title="Error", description="Bot lacks permission to kick this member.", color=discord.Color.red())
+        await (interaction_or_ctx.response.send_message(embed=embed, ephemeral=True) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed, delete_after=10))
 
 async def ban_handler(interaction_or_ctx, member: discord.Member, reason: Optional[str]):
     if not interaction_or_ctx.guild:
@@ -571,12 +568,16 @@ async def ban_handler(interaction_or_ctx, member: discord.Member, reason: Option
     if not await has_permission(interaction_or_ctx, "ban_members"):
         return
     guild_id = interaction_or_ctx.guild.id
-    load_mod_stats(guild_id)
-    await member.ban(reason=reason)
-    update_mod_stats(guild_id, user.id, "banned")
-    await send_dm(member, "banned", user, reason)
-    embed = await mod_action_embed(member, "ban", reason, user)
-    await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
+    await load_mod_stats(guild_id)
+    try:
+        await member.ban(reason=reason)
+        update_mod_stats(guild_id, user.id, "banned")
+        await send_dm(member, "banned", user, reason)
+        embed = await mod_action_embed(member, "ban", reason, user)
+        await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
+    except discord.Forbidden:
+        embed = discord.Embed(title="Error", description="Bot lacks permission to ban this member.", color=discord.Color.red())
+        await (interaction_or_ctx.response.send_message(embed=embed, ephemeral=True) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed, delete_after=10))
 
 async def unban_handler(interaction_or_ctx, user: discord.User, reason: Optional[str]):
     if not interaction_or_ctx.guild:
@@ -585,12 +586,16 @@ async def unban_handler(interaction_or_ctx, user: discord.User, reason: Optional
     if not await has_permission(interaction_or_ctx, "ban_members"):
         return
     guild_id = interaction_or_ctx.guild.id
-    load_mod_stats(guild_id)
-    await interaction_or_ctx.guild.unban(user, reason=reason)
-    update_mod_stats(guild_id, mod.id, "unbanned")
-    await send_dm(user, "unbanned", mod, reason)
-    embed = await mod_action_embed(user, "unban", reason, mod)
-    await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
+    await load_mod_stats(guild_id)
+    try:
+        await interaction_or_ctx.guild.unban(user, reason=reason)
+        update_mod_stats(guild_id, mod.id, "unbanned")
+        await send_dm(user, "unbanned", mod, reason)
+        embed = await mod_action_embed(user, "unban", reason, mod)
+        await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
+    except discord.Forbidden:
+        embed = discord.Embed(title="Error", description="Bot lacks permission to unban this user.", color=discord.Color.red())
+        await (interaction_or_ctx.response.send_message(embed=embed, ephemeral=True) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed, delete_after=10))
 
 async def warn_handler(interaction_or_ctx, member: discord.Member, reason: Optional[str]):
     if not interaction_or_ctx.guild:
@@ -599,7 +604,7 @@ async def warn_handler(interaction_or_ctx, member: discord.Member, reason: Optio
     if not await has_permission(interaction_or_ctx, "kick_members"):
         return
     guild_id = interaction_or_ctx.guild.id
-    load_mod_stats(guild_id)
+    await load_mod_stats(guild_id)
     update_mod_stats(guild_id, mod.id, "warned")
     await send_dm(member, "warned", mod, reason)
     embed = await mod_action_embed(member, "warn", reason, mod)
@@ -614,13 +619,17 @@ async def timeout_handler(interaction_or_ctx, member: discord.Member, duration: 
     if duration <= 0 or duration > 40320:
         return await interaction_or_ctx.response.send_message("Duration must be 1-40320 minutes.", ephemeral=True)
     guild_id = interaction_or_ctx.guild.id
-    load_mod_stats(guild_id)
-    timeout_until = datetime.now(timezone.utc) + timedelta(minutes=duration)
-    await member.timeout(timeout_until, reason=reason)
-    update_mod_stats(guild_id, mod.id, "timed_out")
-    await send_dm(member, f"timed out for {duration} minutes", mod, reason)
-    embed = await mod_action_embed(member, f"timeout ({duration} min)", reason, mod)
-    await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
+    await load_mod_stats(guild_id)
+    try:
+        timeout_until = datetime.now(timezone.utc) + timedelta(minutes=duration)
+        await member.timeout(timeout_until, reason=reason)
+        update_mod_stats(guild_id, mod.id, "timed_out")
+        await send_dm(member, f"timed out for {duration} minutes", mod, reason)
+        embed = await mod_action_embed(member, f"timeout ({duration} min)", reason, mod)
+        await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
+    except discord.Forbidden:
+        embed = discord.Embed(title="Error", description="Bot lacks permission to timeout this member.", color=discord.Color.red())
+        await (interaction_or_ctx.response.send_message(embed=embed, ephemeral=True) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed, delete_after=10))
 
 async def untimeout_handler(interaction_or_ctx, member: discord.Member, reason: Optional[str]):
     if not interaction_or_ctx.guild:
@@ -629,12 +638,16 @@ async def untimeout_handler(interaction_or_ctx, member: discord.Member, reason: 
     if not await has_permission(interaction_or_ctx, "moderate_members"):
         return
     guild_id = interaction_or_ctx.guild.id
-    load_mod_stats(guild_id)
-    await member.timeout(None, reason=reason)
-    update_mod_stats(guild_id, mod.id, "untimed_out")
-    await send_dm(member, "timeout removed", mod, reason)
-    embed = await mod_action_embed(member, "timeout removed", reason, mod)
-    await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
+    await load_mod_stats(guild_id)
+    try:
+        await member.timeout(None, reason=reason)
+        update_mod_stats(guild_id, mod.id, "untimed_out")
+        await send_dm(member, "timeout removed", mod, reason)
+        embed = await mod_action_embed(member, "timeout removed", reason, mod)
+        await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
+    except discord.Forbidden:
+        embed = discord.Embed(title="Error", description="Bot lacks permission to remove timeout.", color=discord.Color.red())
+        await (interaction_or_ctx.response.send_message(embed=embed, ephemeral=True) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed, delete_after=10))
 
 async def jail_handler(interaction_or_ctx, member: discord.Member, reason: Optional[str]):
     if not interaction_or_ctx.guild:
@@ -643,13 +656,17 @@ async def jail_handler(interaction_or_ctx, member: discord.Member, reason: Optio
     if not await has_permission(interaction_or_ctx, "manage_roles"):
         return
     guild_id = interaction_or_ctx.guild.id
-    load_mod_stats(guild_id)
-    jailed_role = await get_jailed_role(interaction_or_ctx.guild)
-    await member.add_roles(jailed_role)
-    update_mod_stats(guild_id, mod.id, "jailed")
-    await send_dm(member, "jailed", mod, reason)
-    embed = await mod_action_embed(member, "jailed", reason, mod)
-    await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
+    await load_mod_stats(guild_id)
+    try:
+        jailed_role = await get_jailed_role(interaction_or_ctx.guild)
+        await member.add_roles(jailed_role, reason=reason)
+        update_mod_stats(guild_id, mod.id, "jailed")
+        await send_dm(member, "jailed", mod, reason)
+        embed = await mod_action_embed(member, "jailed", reason, mod)
+        await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
+    except discord.Forbidden:
+        embed = discord.Embed(title="Error", description="Bot lacks permission to jail this member.", color=discord.Color.red())
+        await (interaction_or_ctx.response.send_message(embed=embed, ephemeral=True) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed, delete_after=10))
 
 async def unjail_handler(interaction_or_ctx, member: discord.Member, reason: Optional[str]):
     if not interaction_or_ctx.guild:
@@ -658,13 +675,17 @@ async def unjail_handler(interaction_or_ctx, member: discord.Member, reason: Opt
     if not await has_permission(interaction_or_ctx, "manage_roles"):
         return
     guild_id = interaction_or_ctx.guild.id
-    load_mod_stats(guild_id)
-    jailed_role = await get_jailed_role(interaction_or_ctx.guild)
-    await member.remove_roles(jailed_role)
-    update_mod_stats(guild_id, mod.id, "unjailed")
-    await send_dm(member, "unjailed", mod, reason)
-    embed = await mod_action_embed(member, "unjailed", reason, mod)
-    await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
+    await load_mod_stats(guild_id)
+    try:
+        jailed_role = await get_jailed_role(interaction_or_ctx.guild)
+        await member.remove_roles(jailed_role, reason=reason)
+        update_mod_stats(guild_id, mod.id, "unjailed")
+        await send_dm(member, "unjailed", mod, reason)
+        embed = await mod_action_embed(member, "unjailed", reason, mod)
+        await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
+    except discord.Forbidden:
+        embed = discord.Embed(title="Error", description="Bot lacks permission to unjail this member.", color=discord.Color.red())
+        await (interaction_or_ctx.response.send_message(embed=embed, ephemeral=True) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed, delete_after=10))
 
 async def inrole_handler(interaction_or_ctx, role: Optional[discord.Role]):
     if not interaction_or_ctx.guild:
@@ -726,11 +747,15 @@ async def quote_handler(interaction_or_ctx, text: str, member: Optional[discord.
     else:
         send_func = interaction_or_ctx.send
     avatar_bytes = await _download_image_bytes(str(target.display_avatar.url))
+    if not avatar_bytes:
+        embed = discord.Embed(title="Error", description="Failed to download avatar.", color=discord.Color.red())
+        return await send_func(embed=embed)
     canvas = Image.new("RGB", (800, 400), (20, 20, 25))
     draw = ImageDraw.Draw(canvas)
     try:
         font = ImageFont.truetype("arial.ttf", 30)
     except:
+        logger.warning("Arial font not found, using default")
         font = ImageFont.load_default()
     lines = _wrap_text(text, font, 760)
     for i, line in enumerate(lines):
@@ -743,12 +768,13 @@ async def quote_handler(interaction_or_ctx, text: str, member: Optional[discord.
     embed = discord.Embed(title="Quote", description=f"By {target.display_name}", color=discord.Color.blue())
     embed.set_image(url="attachment://quote.jpg")
     await send_func(embed=embed, file=file)
+    buffer.close()
 
 async def modstats_handler(interaction_or_ctx, user: Optional[discord.Member]):
     if not interaction_or_ctx.guild:
         return
     guild_id = interaction_or_ctx.guild.id
-    load_mod_stats(guild_id)
+    await load_mod_stats(guild_id)
     target = user or getattr(interaction_or_ctx, "user", interaction_or_ctx.author)
     mod_stats_user = mod_stats.get(guild_id, {}).get(target.id, {"commands": [], "warned": [], "kicked": [], "banned": [], "unbanned": [], "timed_out": [], "untimed_out": [], "jailed": [], "unjailed": []})
     desc = "\n".join(f"{action.title()}: {len(timestamps)}" for action, timestamps in mod_stats_user.items())
@@ -769,19 +795,17 @@ async def me_handler(interaction_or_ctx):
     embed.set_thumbnail(url=user.display_avatar.url)
     await (interaction_or_ctx.response.send_message(embed=embed) if hasattr(interaction_or_ctx, "response") else interaction_or_ctx.send(embed=embed))
 
-# ---------- EVENTS ----------
-msg_cooldown: dict[int, dict[int, float]] = {}
-
+# Events
 @bot.event
 async def on_ready():
     logger.info(f"Logged in as {bot.user}")
-    load_afk()
+    await load_afk()
     for guild in bot.guilds:
-        load_mod_stats(guild.id)
-        load_xp(guild.id)
-        load_last_deleted_photo(guild.id)
+        await load_mod_stats(guild.id)
+        await load_xp(guild.id)
+        await load_last_deleted_photo(guild.id)
         last_seen[guild.id] = datetime.now(timezone.utc).isoformat()
-    save_last_seen()
+    await save_last_seen()
     for attempt in range(3):
         try:
             bot.tree.clear_commands(guild=None)
@@ -800,9 +824,9 @@ async def on_ready():
 @bot.event
 async def on_guild_join(guild: discord.Guild):
     logger.info(f"Joined guild: {guild.name} ({guild.id})")
-    load_mod_stats(guild.id)
-    load_xp(guild.id)
-    load_last_deleted_photo(guild.id)
+    await load_mod_stats(guild.id)
+    await load_xp(guild.id)
+    await load_last_deleted_photo(guild.id)
     if not GUILD_ID:
         from dotenv import set_key
         set_key(".env", "GUILD_ID", str(guild.id))
@@ -816,7 +840,7 @@ async def on_message_delete(message: discord.Message):
         if len(photos) > 10:
             photos.pop()
         last_deleted_photo[guild_id] = photos
-        save_last_deleted_photo(guild_id)
+        await save_last_deleted_photo(guild_id)
     await bot.process_commands(message)
 
 @bot.event
@@ -828,7 +852,7 @@ async def on_message(message: discord.Message):
         afk_time = datetime.now(timezone.utc) - datetime.fromisoformat(info['since'])
         embed = discord.Embed(title="Welcome Back!", description=f"AFK for {str(afk_time).split('.')[0]}: {info['reason']}", color=discord.Color.green())
         await message.channel.send(f"{message.author.mention}", embed=embed, delete_after=10)
-        save_afk()
+        await save_afk()
     for user in message.mentions:
         if user.id in afk_cache:
             info = afk_cache[user.id]
@@ -838,11 +862,11 @@ async def on_message(message: discord.Message):
         now = datetime.now().timestamp()
         guild_cd = msg_cooldown.setdefault(message.guild.id, {})
         if now - guild_cd.get(message.author.id, 0) > 120:
-            add_user_xp(message.guild.id, message.author.id, random.randint(15, 25))
+            await add_user_xp(message.guild.id, message.author.id, random.randint(15, 25))
             guild_cd[message.author.id] = now
     await bot.process_commands(message)
 
-# ---------- ERROR HANDLING ----------
+# Error handling
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandOnCooldown):
@@ -865,7 +889,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         logger.error(f"Slash command error: {error}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ---------- SLASH COMMANDS ----------
+# Slash commands
 @tree.command(name="ping", description="Check bot latency")
 @app_commands.checks.cooldown(1, 30.0, key=lambda i: i.guild_id)
 async def ping_slash(interaction: discord.Interaction):
@@ -1065,7 +1089,7 @@ async def showlm_slash(interaction: discord.Interaction, number: int = 1):
 async def me_slash(interaction: discord.Interaction):
     await me_handler(interaction)
 
-# ---------- PREFIX COMMANDS ----------
+# Prefix commands
 @bot.command(name="ping")
 @commands.cooldown(1, 30.0, commands.BucketType.guild)
 async def ping_prefix(ctx):
@@ -1251,5 +1275,6 @@ async def showlm_prefix(ctx, number: int = 1):
 async def me_prefix(ctx):
     await me_handler(ctx)
 
-# ---------- RUN ----------
-bot.run(TOKEN)
+# Run bot
+if __name__ == "__main__":
+    asyncio.run(bot.start(TOKEN))
